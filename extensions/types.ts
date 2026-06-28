@@ -2,6 +2,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 
 export interface RouterConfig {
   models: Record<string, CustomModelConfig>
+  rateLimitCooldownMs?: number
 }
 
 export interface CustomModelConfig {

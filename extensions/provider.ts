@@ -26,6 +26,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
+import { isRateLimited, markRateLimited, isRateLimitError } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -221,6 +222,21 @@ const routeStream = (
 
     for (let i = 0; i < candidates.length; i++) {
       const ref = candidates[i];
+
+      // --- Rate-limit cooldown check (skip if still in cooldown) ---
+      if (isRateLimited(ref)) {
+        lastError = new Error(`${ref} is rate-limited (cooldown active)`);
+        if (i < candidates.length - 1) {
+          const nextRef = candidates[i + 1];
+          pushTextBlock(
+            stream,
+            output,
+            `\n⏳ ${ref} cooldown, skip ke ${nextRef}\n`,
+          );
+        }
+        continue;
+      }
+
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) {
         lastError = new Error(`Invalid model ref: ${ref}`);
@@ -315,14 +331,19 @@ const routeStream = (
         return;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        const isLast = i === candidates.length - 1;
 
+        // Mark failed model with cooldown so it's skipped on subsequent turns
+        markRateLimited(ref, config.rateLimitCooldownMs);
+
+        const isLast = i === candidates.length - 1;
         if (!isLast) {
           const nextRef = candidates[i + 1];
+          const prefix = isRateLimitError(lastError) ? '🚫' : '⚠️';
+          const cause = isRateLimitError(lastError) ? ' (rate limit)' : '';
           pushTextBlock(
             stream,
             output,
-            `\n⚠️ ${ref} gagal, fallback ke ${nextRef}\n`,
+            `\n${prefix} ${ref} gagal${cause}, fallback ke ${nextRef}\n`,
           );
         }
       }

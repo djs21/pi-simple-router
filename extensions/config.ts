@@ -74,7 +74,16 @@ export const normalizeConfig = (raw: unknown): RouterConfig => {
     models[key] = config
   }
 
-  return { models }
+  const result: RouterConfig = { models }
+
+  if (obj.rateLimitCooldownMs !== undefined) {
+    if (typeof obj.rateLimitCooldownMs !== 'number' || obj.rateLimitCooldownMs < 0) {
+      throw new Error('rateLimitCooldownMs must be a non-negative number')
+    }
+    result.rateLimitCooldownMs = obj.rateLimitCooldownMs
+  }
+
+  return result
 }
 
 export const getMaxThinkingLevel = (

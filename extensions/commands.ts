@@ -8,6 +8,7 @@ import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
+import { getActiveRateLimits } from './rate-limit-tracker.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -425,6 +426,20 @@ export function registerCommands(
           if (cfg.thinking) line += ` [thinking: ${cfg.thinking}]`
           lines.push(line)
         }
+
+        // Active rate limits
+        const limits = getActiveRateLimits()
+        if (limits.length > 0) {
+          lines.push('')
+          lines.push('⏳ Rate Limit Cooldown:')
+          for (const { ref, remainingMs } of limits) {
+            const mins = Math.ceil(remainingMs / 60_000)
+            const secs = Math.ceil((remainingMs % 60_000) / 1000)
+            const remaining = mins >= 1 ? `${mins}m` : `${secs}d`
+            lines.push(`  ${ref} — cooldown ${remaining} lagi`)
+          }
+        }
+
         ctx.ui.notify(lines.join('\n'), 'info')
         return
       }
