@@ -124,3 +124,44 @@ export const resolveModelRef = (
 
   return { provider, modelId }
 }
+
+// ---------------------------------------------------------------------------
+// Separate configs (for commands that need to know which scope to write to)
+// ---------------------------------------------------------------------------
+
+export const loadSeparateConfigs = (): {
+  global: RouterConfig
+  project: RouterConfig
+} => {
+  const globalPath = join(homedir(), '.pi', 'agent', CONFIG_FILENAME)
+  const projectPath = join(process.cwd(), '.pi', CONFIG_FILENAME)
+
+  const readConfig = (filePath: string): RouterConfig | null => {
+    try {
+      const raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+      return normalizeConfig(raw)
+    } catch {
+      return null
+    }
+  }
+
+  return {
+    global: readConfig(globalPath) ?? { models: {} },
+    project: readConfig(projectPath) ?? { models: {} },
+  }
+}
+
+export type ModelSource = 'global' | 'project' | 'both' | 'none'
+
+export const getModelSource = (
+  name: string,
+  global: RouterConfig,
+  project: RouterConfig,
+): ModelSource => {
+  const inGlobal = name in global.models
+  const inProject = name in project.models
+  if (inGlobal && inProject) return 'both'
+  if (inGlobal) return 'global'
+  if (inProject) return 'project'
+  return 'none'
+}

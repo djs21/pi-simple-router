@@ -12,3 +12,5 @@ export interface CustomModelConfig {
 export interface RouterState {
   currentModel: string | null
 }
+
+export type SaveScope = 'global' | 'project'
