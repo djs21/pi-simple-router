@@ -7,7 +7,7 @@ import { showModelSelector, buildModelOptions } from './model-selector.js'
 import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME } from './constants.js'
-import { loadSeparateConfigs, getModelSource, type ModelSource } from './config.js'
+import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -44,7 +44,7 @@ function scopePath(scope: SaveScope): string {
 function readScopeConfig(scope: SaveScope): RouterConfig {
   try {
     const raw = JSON.parse(readFileSync(scopePath(scope), 'utf-8'))
-    return { models: {} } // fallback; will be normalized below
+    return normalizeConfig(raw)
   } catch {
     return { models: {} }
   }
