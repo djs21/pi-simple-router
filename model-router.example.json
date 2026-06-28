@@ -1,4 +1,5 @@
 {
+  "rateLimitCooldownMs": 300000,
   "models": {
     "thinker": {
       "models": [

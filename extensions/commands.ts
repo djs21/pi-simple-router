@@ -8,7 +8,7 @@ import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
-import { getActiveRateLimits } from './rate-limit-tracker.js'
+import { getActiveRateLimits, clearRateLimits } from './rate-limit-tracker.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -27,8 +27,9 @@ const SUBCOMMANDS: Array<{
   name: string
   description: string
 }> = [
-  { name: 'status', description: 'Lihat config aktif' },
+  { name: 'status', description: 'Lihat config aktif + cooldown' },
   { name: 'reload', description: 'Reload config dari file' },
+  { name: 'clearcache', description: 'Reset cooldown cache' },
   { name: 'help', description: 'Bantuan' },
 ]
 
@@ -447,6 +448,12 @@ export function registerCommands(
       if (subcmd === 'reload') {
         await reloadConfig()
         ctx.ui.notify('🔄 Router config reloaded', 'info')
+        return
+      }
+
+      if (subcmd === 'clearcache') {
+        clearRateLimits()
+        ctx.ui.notify('🧹 Cooldown cache cleared', 'info')
         return
       }
 

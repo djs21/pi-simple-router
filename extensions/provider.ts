@@ -26,7 +26,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, isRateLimitError } from './rate-limit-tracker';
+import { isRateLimited, markRateLimited, isRateLimitError, isTransientError } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -219,13 +219,14 @@ const routeStream = (
     stream.push({ type: 'start', partial: output });
 
     let lastError: Error | undefined;
+    let allCooldown = true;
 
     for (let i = 0; i < candidates.length; i++) {
       const ref = candidates[i];
 
-      // --- Rate-limit cooldown check (skip if still in cooldown) ---
+      // --- Cooldown check (skip if still in cooldown) ---
       if (isRateLimited(ref)) {
-        lastError = new Error(`${ref} is rate-limited (cooldown active)`);
+        lastError = new Error(`${ref} lagi cooldown`);
         if (i < candidates.length - 1) {
           const nextRef = candidates[i + 1];
           pushTextBlock(
@@ -236,6 +237,7 @@ const routeStream = (
         }
         continue;
       }
+      allCooldown = false;
 
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) {
@@ -332,8 +334,12 @@ const routeStream = (
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
 
-        // Mark failed model with cooldown so it's skipped on subsequent turns
-        markRateLimited(ref, config.rateLimitCooldownMs);
+        // Cooldown only for transient server-side errors (rate limit, 5xx, timeout).
+        // Permanent errors (model not found, auth failure, invalid ref) skip cooldown
+        // so they fail fast every time instead of clogging the chain.
+        if (isTransientError(lastError)) {
+          markRateLimited(ref, config.rateLimitCooldownMs);
+        }
 
         const isLast = i === candidates.length - 1;
         if (!isLast) {
@@ -350,15 +356,16 @@ const routeStream = (
     }
 
     // All fallbacks exhausted
+    const errorMsg = allCooldown
+      ? `Semua model di ${customName} sedang cooldown. Tunggu beberapa menit atau gunakan /router clearcache`
+      : lastError
+        ? `Semua model di ${customName} gagal. Terakhir: ${lastError.message}`
+        : `Semua model di ${customName} gagal`
+
     stream.push({
       type: 'error',
       reason: 'error',
-      error: createErrorMessage(
-        model,
-        lastError
-          ? `Semua model di ${customName} gagal. Terakhir: ${lastError.message}`
-          : `Semua model di ${customName} gagal`,
-      ),
+      error: createErrorMessage(model, errorMsg),
     });
     stream.end();
   })();

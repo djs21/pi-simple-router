@@ -38,6 +38,44 @@ export function isRateLimitError(error: unknown): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => msg.includes(p))
 }
 
+/** Patterns for transient server-side errors worth a cooldown. */
+const TRANSIENT_PATTERNS = [
+  ...RATE_LIMIT_PATTERNS,
+  // Server errors
+  '502', '503', '504',
+  'service unavailable',
+  'internal server error',
+  'gateway timeout',
+  'bad gateway',
+  'upstream',
+  'origin error',
+  // Timeout / connection
+  'timeout',
+  'timed out',
+  'econnrefused',
+  'econnreset',
+  'network error',
+  'socket hang up',
+  'overloaded',
+  'temporarily',
+  'backend',
+  // Provider-level
+  'provider returned error',
+]
+
+/**
+ * Check whether an error is a transient server-side error.
+ *
+ * Transient errors (rate limits, 5xx, timeouts) get cooldown so the
+ * model is skipped on subsequent turns. Permanent errors (model not
+ * found, auth failure, invalid ref) do NOT get cooldown — they should
+ * fail fast every time.
+ */
+export function isTransientError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return TRANSIENT_PATTERNS.some((p) => msg.includes(p))
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
