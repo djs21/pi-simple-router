@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import type { AutocompleteItem } from '@earendil-works/pi-tui'
+import { showModelSelector, buildModelOptions } from './model-selector.js'
 import type { RouterConfig, CustomModelConfig } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME } from './constants.js'
@@ -40,25 +41,25 @@ async function pickModels(
   preSelected?: string[],
 ): Promise<string[]> {
   const registry = getModelRegistry()
-  const allModels = registry?.getAvailable() ?? []
-  const allRefs = allModels.map((m: any) => `${m.provider}/${m.id}`).sort()
-
+  const options = buildModelOptions(registry)
   const selected = new Set(preSelected ?? [])
 
   while (true) {
-    const available = allRefs.filter((r: string) => !selected.has(r))
-    const options = available.length > 0
-      ? [...available, '✅ Selesai']
-      : ['✅ Selesai']
+    const available = options.filter((o) => !selected.has(o.value))
+    if (available.length === 0 && selected.size > 0) break
+
+    const sortedOptions = [
+      ...available.sort((a, b) => a.value.localeCompare(b.value)),
+    ]
 
     if (selected.size === 0 && available.length === 0) return []
 
-    const pick = await ctx.ui.select(
-      `Pilih model (${selected.size} dipilih)`,
-      options,
+    const pick = await showModelSelector(
+      ctx,
+      sortedOptions,
+      `Pilih model (${selected.size} dipilih) — Enter tambah, Esc selesai`,
     )
-
-    if (!pick || pick === '✅ Selesai') break
+    if (!pick) break // Esc → selesai
 
     selected.add(pick)
   }
