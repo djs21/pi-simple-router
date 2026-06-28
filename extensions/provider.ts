@@ -351,7 +351,7 @@ export const registerRouterProvider = (
 
   api.registerProvider(PROVIDER_NAME, {
     baseUrl: 'http://router.local',
-    apiKey: '',
+    apiKey: 'pi-model-router',
     api: 'router-local-api' as Api,
     models,
     streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream =>

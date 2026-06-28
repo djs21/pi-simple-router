@@ -73,7 +73,7 @@ describe('registerRouterProvider', () => {
       PROVIDER_NAME,
       expect.objectContaining({
         baseUrl: 'http://router.local',
-        apiKey: '',
+        apiKey: 'pi-model-router',
         api: 'router-local-api',
         models: expect.any(Array),
         streamSimple: expect.any(Function),
