@@ -1,0 +1,28 @@
+{
+  "name": "pi-model-router",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Custom model router pi extension with fallback chain",
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^3.0.0"
+  },
+  "exports": {
+    "./extensions/*": "./extensions/*"
+  }
+}

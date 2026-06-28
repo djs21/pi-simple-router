@@ -1,0 +1,18 @@
+{
+  "models": {
+    "thinker": {
+      "models": [
+        "opencode-go/deepseek-v4-pro",
+        "mimo-2.5-pro",
+        "opencode/deepseek-v4-flash-free"
+      ],
+      "thinking": "high"
+    },
+    "pekerja": {
+      "models": [
+        "openrouter/owl-alpha",
+        "opencode/deepseek-v4-flash-free"
+      ]
+    }
+  }
+}
