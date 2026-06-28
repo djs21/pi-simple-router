@@ -32,9 +32,9 @@ import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config'
 // ---------------------------------------------------------------------------
 
 /** Check whether the model referenced by a canonical ref supports image input. */
-const modelSupportsImage = (ref: string, registry: ModelRegistry): boolean => {
+const modelSupportsImage = (ref: string, registry: ModelRegistry | null): boolean => {
   const resolved = resolveModelRef(ref, registry);
-  if (!resolved) return false;
+  if (!resolved || !registry) return false;
   const m = registry.find(resolved.provider, resolved.modelId);
   return m?.input?.includes('image') ?? false;
 };
@@ -63,7 +63,7 @@ const truncateMessages = (messages: Message[], maxChars: number): Message[] => {
 /** Build the model array to pass to registerProvider. */
 const buildModels = (
   config: RouterConfig,
-  registry: ModelRegistry,
+  registry: ModelRegistry | null,
 ): Array<{
   id: string;
   name: string;
@@ -86,6 +86,9 @@ const buildModels = (
     for (const ref of refs) {
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) continue;
+      // Skip metadata lookup when registry is not available yet
+      // (eager registration). Defaults will be used.
+      if (!registry) continue;
       const m = registry.find(resolved.provider, resolved.modelId);
       if (!m) continue;
 
@@ -161,7 +164,7 @@ const routeStream = (
   context: Context,
   options: SimpleStreamOptions | undefined,
   config: RouterConfig,
-  registry: ModelRegistry,
+  registry: ModelRegistry | null,
 ): AssistantMessageEventStream => {
   const stream = createAssistantMessageEventStream();
 
@@ -181,6 +184,17 @@ const routeStream = (
     const refs = cfg.models;
     const hasImages = contextHasImage(context);
     const userThinking: ThinkingLevel | null | undefined = cfg.thinking;
+
+    // Registry must be available for fallback delegation
+    if (!registry) {
+      stream.push({
+        type: 'error',
+        reason: 'error',
+        error: createErrorMessage(model, 'Router not initialized — model registry unavailable'),
+      });
+      stream.end();
+      return;
+    }
 
     // Filter candidates by image support when context has images
     const candidates = hasImages
@@ -345,7 +359,7 @@ const routeStream = (
 export const registerRouterProvider = (
   api: ExtensionAPI,
   config: RouterConfig,
-  modelRegistry: ModelRegistry,
+  modelRegistry: ModelRegistry | null,
 ): void => {
   const models = buildModels(config, modelRegistry);
 

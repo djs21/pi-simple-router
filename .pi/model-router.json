@@ -2,8 +2,9 @@
   "models": {
     "worker": {
       "models": [
-        "opencode/deepseek-v4-flash-free,",
-        "openrouter/owl-alpha"
+        "opencode/deepseek-v4-flash-free",
+        "openrouter/owl-alpha",
+        "openrouter/google/gemma-4-31b-it:free"
       ]
     }
   }

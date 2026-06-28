@@ -113,7 +113,7 @@ export const contextHasImage = (
 
 export const resolveModelRef = (
   ref: string,
-  _modelRegistry: { find?: (provider: string, modelId: string) => unknown },
+  _modelRegistry?: { find?: (provider: string, modelId: string) => unknown } | null,
 ): { provider: string; modelId: string } | null => {
   const slashIdx = ref.indexOf('/')
   if (slashIdx <= 0 || slashIdx >= ref.length - 1) return null

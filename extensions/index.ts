@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { RouterConfig } from './types.js'
-import { PROVIDER_NAME } from './constants.js'
 import { loadRouterConfig } from './config.js'
 import { registerRouterProvider } from './provider.js'
 import { registerCommands } from './commands.js'
@@ -11,8 +10,11 @@ export default function routerExtension(api: ExtensionAPI): void {
   let currentConfig: RouterConfig = { models: {} }
   let lastModelsFingerprint = ''
   let modelRegistry: any = null
+  // Track whether the most recent registerRouterProvider call had a null registry.
+  // When registry becomes available later (on session_start), we need to re-register
+  // to update the streamSimple closure with the real registry.
+  let lastRegistrationHadRegistry = false
 
-  // --- Helpers ---
   function computeFingerprint(config: RouterConfig): string {
     return JSON.stringify(config.models)
   }
@@ -21,20 +23,30 @@ export default function routerExtension(api: ExtensionAPI): void {
     const config = await loadRouterConfig()
     currentConfig = config
 
-    // Re-registration guard
-    const fp = computeFingerprint(config)
-    if (fp === lastModelsFingerprint && modelRegistry) {
-      return // skip, same config
+    const configChanged = computeFingerprint(config) !== lastModelsFingerprint
+    if (configChanged) {
+      lastModelsFingerprint = computeFingerprint(config)
     }
 
-    lastModelsFingerprint = fp
+    const haveRegistryNow = !!modelRegistry
+    // Re-register if: config changed, or registry transitions null → available
+    const needsReRegister = configChanged || (!lastRegistrationHadRegistry && haveRegistryNow)
+    if (!needsReRegister) return
+
+    lastRegistrationHadRegistry = haveRegistryNow
     registerRouterProvider(api, config, modelRegistry)
   }
 
+  // --- Eager registration ---
+  loadAndRegister().catch((err) =>
+    console.error('[router-extension] Eager registration failed:', err),
+  )
+
   // --- Hooks ---
   api.on('session_start', async (_event: unknown, ctx: ExtensionContext) => {
-    // Dapatkan modelRegistry dari ctx atau api
-    modelRegistry = (api as any).modelRegistry ?? (ctx as any).modelRegistry
+    if (!modelRegistry) {
+      modelRegistry = (api as any).modelRegistry ?? (ctx as any).modelRegistry
+    }
 
     await loadAndRegister()
     setStatusLine(ctx, `🔀 Router: ${Object.keys(currentConfig.models).length} models`)
@@ -47,6 +59,5 @@ export default function routerExtension(api: ExtensionAPI): void {
   // --- Register commands ---
   registerCommands(api, () => currentConfig, loadAndRegister, () => modelRegistry)
 
-  // --- Initial status ---
   console.log('[router-extension] Loaded. Config models:', Object.keys(currentConfig.models).length)
 }
