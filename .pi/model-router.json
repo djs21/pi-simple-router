@@ -1,0 +1,10 @@
+{
+  "models": {
+    "worker": {
+      "models": [
+        "opencode/deepseek-v4-flash-free,",
+        "openrouter/owl-alpha"
+      ]
+    }
+  }
+}

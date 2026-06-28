@@ -32,12 +32,47 @@ function getRouterNames(config: RouterConfig): string[] {
   return Object.keys(config.models).sort()
 }
 
+// === Model Picker ===
+
+async function pickModels(
+  ctx: ExtensionCommandContext,
+  getModelRegistry: () => any,
+  preSelected?: string[],
+): Promise<string[]> {
+  const registry = getModelRegistry()
+  const allModels = registry?.getAvailable() ?? []
+  const allRefs = allModels.map((m: any) => `${m.provider}/${m.id}`).sort()
+
+  const selected = new Set(preSelected ?? [])
+
+  while (true) {
+    const available = allRefs.filter((r: string) => !selected.has(r))
+    const options = available.length > 0
+      ? [...available, '✅ Selesai']
+      : ['✅ Selesai']
+
+    if (selected.size === 0 && available.length === 0) return []
+
+    const pick = await ctx.ui.select(
+      `Pilih model (${selected.size} dipilih)`,
+      options,
+    )
+
+    if (!pick || pick === '✅ Selesai') break
+
+    selected.add(pick)
+  }
+
+  return [...selected]
+}
+
 // === Interactive Menu Logic ===
 
 async function mainMenu(
   ctx: ExtensionCommandContext,
   getConfig: () => RouterConfig,
   reloadConfig: () => Promise<void>,
+  getModelRegistry: () => any,
 ): Promise<void> {
   let running = true
   while (running) {
@@ -46,10 +81,10 @@ async function mainMenu(
 
     switch (choice) {
       case '🔧 Buat router baru':
-        await createRouter(ctx, getConfig, reloadConfig)
+        await createRouter(ctx, getConfig, reloadConfig, getModelRegistry)
         break
       case '✏️  Edit router':
-        await editRouter(ctx, getConfig, reloadConfig)
+        await editRouter(ctx, getConfig, reloadConfig, getModelRegistry)
         break
       case '🗑️  Hapus router':
         await deleteRouter(ctx, getConfig, reloadConfig)
@@ -68,43 +103,37 @@ async function createRouter(
   ctx: ExtensionCommandContext,
   getConfig: () => RouterConfig,
   reloadConfig: () => Promise<void>,
+  getModelRegistry: () => any,
 ): Promise<void> {
   const name = await ctx.ui.input('Nama router baru', 'thinker')
-  if (!name) return // ESC → main menu
+  if (!name) return
 
-  while (true) {
-    const modelsStr = await ctx.ui.input(
-      'Daftar model (pisah spasi)',
-      'opencode-go/deepseek-v4-pro mimo-2.5-pro',
-    )
-    if (!modelsStr) return // ESC → main menu
-
-    const thinking = await ctx.ui.input(
-      'Thinking level (opsional, kosongkan default)',
-      'high',
-    )
-    if (thinking === undefined) continue // ESC → back to models input
-
-    const entry: CustomModelConfig = {
-      models: modelsStr.split(/\s+/).filter(Boolean),
-    }
-    if (thinking) {
-      entry.thinking = thinking as ThinkingLevel
-    }
-
-    const config = getConfig()
-    config.models[name] = entry
-    saveConfig(config)
-    await reloadConfig()
-    ctx.ui.notify(`✅ Router '${name}' berhasil dibuat!`, 'info')
+  const models = await pickModels(ctx, getModelRegistry)
+  if (models.length === 0) {
+    ctx.ui.notify('⚠️ Minimal pilih 1 model', 'warning')
     return
   }
+
+  const thinking = await ctx.ui.input('Thinking level (opsional)', 'high')
+  if (thinking === undefined) return
+
+  const entry: CustomModelConfig = {
+    models,
+    ...(thinking ? { thinking: thinking as ThinkingLevel } : {}),
+  }
+
+  const config = getConfig()
+  config.models[name] = entry
+  saveConfig(config)
+  await reloadConfig()
+  ctx.ui.notify(`✅ Router '${name}' berhasil dibuat!`, 'info')
 }
 
 async function editRouter(
   ctx: ExtensionCommandContext,
   getConfig: () => RouterConfig,
   reloadConfig: () => Promise<void>,
+  getModelRegistry: () => any,
 ): Promise<void> {
   const config = getConfig()
   const names = getRouterNames(config)
@@ -123,16 +152,33 @@ async function editRouter(
     const existing = config.models[selectedName]
 
     if (field === 'models') {
-      const currentValue = existing.models.join(' ')
-      const modelsStr = await ctx.ui.input(
-        'Daftar model baru (pisah spasi)',
-        currentValue,
-      )
-      if (!modelsStr) continue // ESC → back to field select
+      const action = await ctx.ui.select('Pilih aksi', [
+        'Tambah model',
+        'Hapus model',
+        'Reset semua',
+        'Batal',
+      ])
+      if (!action || action === 'Batal') continue
 
-      config.models[selectedName] = {
-        ...existing,
-        models: modelsStr.split(/\s+/).filter(Boolean),
+      if (action === 'Reset semua') {
+        const newModels = await pickModels(ctx, getModelRegistry)
+        if (newModels.length > 0) {
+          config.models[selectedName].models = newModels
+        }
+      } else if (action === 'Tambah model') {
+        const addModels = await pickModels(ctx, getModelRegistry, existing.models)
+        if (addModels.length > existing.models.length) {
+          config.models[selectedName].models = addModels
+        }
+      } else if (action === 'Hapus model') {
+        if (existing.models.length === 0) {
+          ctx.ui.notify('⚠️ Tidak ada model untuk dihapus', 'warning')
+          continue
+        }
+        const toRemove = await ctx.ui.select('Pilih model yang dihapus', existing.models)
+        if (toRemove) {
+          config.models[selectedName].models = existing.models.filter((m) => m !== toRemove)
+        }
       }
     } else {
       const currentValue = existing.thinking ?? ''
@@ -211,6 +257,7 @@ export function registerCommands(
   api: ExtensionAPI,
   getConfig: () => RouterConfig,
   reloadConfig: () => Promise<void>,
+  getModelRegistry: () => any,
 ): void {
   api.registerCommand('router', {
     description: 'Custom model router commands (interactive)',
@@ -248,7 +295,7 @@ export function registerCommands(
       }
 
       // No matching subcommand → interactive menu
-      await mainMenu(ctx, getConfig, reloadConfig)
+      await mainMenu(ctx, getConfig, reloadConfig, getModelRegistry)
     },
     getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] | null => {
       const trimmed = argumentPrefix.trimStart()

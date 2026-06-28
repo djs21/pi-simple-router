@@ -72,7 +72,7 @@ describe('registerRouterProvider', () => {
     expect(mockApi.registerProvider).toHaveBeenCalledWith(
       PROVIDER_NAME,
       expect.objectContaining({
-        baseUrl: '',
+        baseUrl: 'http://router.local',
         apiKey: '',
         api: 'router-local-api',
         models: expect.any(Array),

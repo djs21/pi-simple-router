@@ -350,7 +350,7 @@ export const registerRouterProvider = (
   const models = buildModels(config, modelRegistry);
 
   api.registerProvider(PROVIDER_NAME, {
-    baseUrl: '',
+    baseUrl: 'http://router.local',
     apiKey: '',
     api: 'router-local-api' as Api,
     models,

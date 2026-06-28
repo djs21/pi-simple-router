@@ -45,7 +45,7 @@ export default function routerExtension(api: ExtensionAPI): void {
   })
 
   // --- Register commands ---
-  registerCommands(api, () => currentConfig, loadAndRegister)
+  registerCommands(api, () => currentConfig, loadAndRegister, () => modelRegistry)
 
   // --- Initial status ---
   console.log('[router-extension] Loaded. Config models:', Object.keys(currentConfig.models).length)
