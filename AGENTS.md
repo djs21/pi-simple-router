@@ -85,6 +85,7 @@ When the user requests a durable behavior change, record it here or in the relev
 |---|---|
 | `docs/` | Project documentation, plans, ADRs. See `docs/plan.md` for current implementation plan. |
 | `extensions/` | Extension source code + tests (9 modules, ~850 lines). Custom model router pi extension with fallback chain. Vitest unit tests in `*.test.ts`. See `docs/plan.md` for full spec. |
+| `README.md` | Project overview, instalasi, konfigurasi, usage, commands, features, development guide, dan lisensi dalam Bahasa Indonesia. |
 | `package.json` | Root project manifest: pi extension registration, scripts (`npm test` → vitest, `npm run typecheck` → tsc), devDependencies. |
 | `tsconfig.json` | TypeScript configuration: strict, ESNext, bundler resolution. |
 | `model-router.example.json` | Example user configuration for the model router extension. |
