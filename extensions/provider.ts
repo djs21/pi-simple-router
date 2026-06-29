@@ -26,11 +26,31 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, isRateLimitError, isTransientError } from './rate-limit-tracker';
+import { isRateLimited, markRateLimited, isRateLimitError, isTransientError, getRemainingCooldownMs } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
 // ---------------------------------------------------------------------------
+
+/** Format milliseconds to human-readable duration (e.g. "3m 24s"). */
+const formatDuration = (ms: number): string => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+};
+
+/** Error patterns indicating a provider-wide outage (not model-specific). */
+const PROVIDER_LEVEL_PATTERNS = [
+  '502', '503', '504',
+  'service unavailable',
+  'bad gateway',
+  'gateway timeout',
+  'overloaded',
+];
+const isProviderLevelError = (error: unknown): boolean => {
+  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return PROVIDER_LEVEL_PATTERNS.some(p => msg.includes(p));
+};
 
 // ---------------------------------------------------------------------------
 // Smart model lookup — handles OpenRouter's upstream-prefixed model IDs
@@ -436,7 +456,6 @@ const routeStream = (
     const elapsedStart = Date.now();
 
     let lastError: Error | undefined;
-    let allCooldown = true;
 
     // Check if pi already aborted before any work
     try { checkAborted(options?.signal); } catch (e) {
@@ -461,26 +480,43 @@ const routeStream = (
         break;
       }
 
-      // --- Cooldown check (skip if still in cooldown) ---
-      if (isRateLimited(ref)) {
-        lastError = new Error(`${ref} lagi cooldown`);
-        if (!isLast) {
-          const nextRef = candidates[i + 1];
-          pushTextBlock(
-            stream,
-            output,
-            `\n⏳ ${ref} cooldown, skip ke ${nextRef}\n`,
-          );
-        }
-        continue;
-      }
-      allCooldown = false;
-
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) {
         lastError = new Error(`Unknown model: ${ref}`);
         if (!isLast) {
           pushTextBlock(stream, output, `\n⚠️ ${ref} tidak dikenal, skip\n`);
+        }
+        continue;
+      }
+
+      // --- Cooldown check (model-level) ---
+      if (isRateLimited(ref)) {
+        const remainingMs = getRemainingCooldownMs(ref) ?? 0;
+        const remainingStr = formatDuration(remainingMs);
+        lastError = new Error(`${ref} lagi cooldown (sisa ${remainingStr})`);
+        if (!isLast) {
+          const nextRef = candidates[i + 1];
+          pushTextBlock(
+            stream,
+            output,
+            `\n⏳ ${ref} cooldown (sisa ${remainingStr}), skip ke ${nextRef}\n`,
+          );
+        }
+        continue;
+      }
+
+      // --- Cooldown check (provider-level) ---
+      if (isRateLimited(`__provider:${resolved.provider}`)) {
+        const remainingMs = getRemainingCooldownMs(`__provider:${resolved.provider}`) ?? 0;
+        const remainingStr = formatDuration(remainingMs);
+        lastError = new Error(`Provider ${resolved.provider} sedang cooldown (sisa ${remainingStr})`);
+        if (!isLast) {
+          const nextRef = candidates[i + 1];
+          pushTextBlock(
+            stream,
+            output,
+            `\n⏳ ${resolved.provider} cooldown (provider, sisa ${remainingStr}), skip ke ${nextRef}\n`,
+          );
         }
         continue;
       }
@@ -572,7 +608,12 @@ const routeStream = (
         // RouterAbortError (pi timeout) is NOT a transient model error —
         // don't cooldown, just fail fast.
         if (!isAbort && isTransientError(lastError)) {
+          // Cooldown model-level
           markRateLimited(ref, config.rateLimitCooldownMs);
+          // Cooldown provider-level untuk infra errors (502, 503, 504, dll)
+          if (isProviderLevelError(lastError)) {
+            markRateLimited(`__provider:${resolved.provider}`, config.rateLimitCooldownMs);
+          }
         }
 
         if (!isLast) {
@@ -608,7 +649,7 @@ const routeStream = (
     const elapsed = ((Date.now() - elapsedStart) / 1000).toFixed(1);
     let errorMsg: string;
 
-    if (allCooldown) {
+    if (candidates.every(ref => isRateLimited(ref))) {
       errorMsg = `Semua model di ${customName} sedang cooldown. Tunggu beberapa menit atau gunakan /router clearcache`;
     } else if (lastError instanceof RouterAbortError) {
       errorMsg = `Request dibatalkan setelah ${elapsed}s: pi menghentikan permintaan. ` +

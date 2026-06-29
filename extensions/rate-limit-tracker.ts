@@ -127,3 +127,13 @@ export function getActiveRateLimits(): Array<{ ref: string; remainingMs: number 
 export function clearRateLimits(): void {
   RATE_LIMITED.clear()
 }
+
+/**
+ * Get remaining cooldown time for a model ref, or null if not in cooldown.
+ */
+export function getRemainingCooldownMs(ref: string): number | null {
+  const expiry = RATE_LIMITED.get(ref)
+  if (expiry === undefined) return null
+  const remaining = expiry - Date.now()
+  return remaining > 0 ? remaining : null
+}
