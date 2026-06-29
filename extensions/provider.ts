@@ -241,7 +241,10 @@ const routeStream = (
 
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) {
-        lastError = new Error(`Invalid model ref: ${ref}`);
+        lastError = new Error(`Unknown model: ${ref}`);
+        if (i < candidates.length - 1) {
+          pushTextBlock(stream, output, `\n⚠️ ${ref} tidak dikenal, skip\n`);
+        }
         continue;
       }
 
@@ -253,12 +256,11 @@ const routeStream = (
 
       // Auth
       const auth = await registry.getApiKeyAndHeaders(targetModel);
-      if (!auth.ok || !auth.apiKey) {
-        lastError = new Error(
-          auth.ok
-            ? `No API key for ${ref}`
-            : `Auth failed for ${ref}: ${auth.error}`,
-        );
+      if (!auth || !auth.ok || !auth.apiKey) {
+        lastError = new Error(`Auth gagal untuk ${ref}`);
+        if (i < candidates.length - 1) {
+          pushTextBlock(stream, output, `\n🔑 ${ref} gagal auth, skip\n`);
+        }
         continue;
       }
 
@@ -287,10 +289,14 @@ const routeStream = (
       // Context truncation (simple oldest-first heuristic)
       let ctx = context;
       if (targetModel.contextWindow) {
-        const maxChars = targetModel.contextWindow * 3;
-        const totalChars = JSON.stringify(ctx.messages).length;
-        if (totalChars > maxChars) {
-          ctx = { ...ctx, messages: truncateMessages(ctx.messages, maxChars) };
+        try {
+          const maxChars = targetModel.contextWindow * 3;
+          const totalChars = JSON.stringify(ctx.messages).length;
+          if (totalChars > maxChars) {
+            ctx = { ...ctx, messages: truncateMessages(ctx.messages, maxChars) };
+          }
+        } catch {
+          // JSON.stringify failed (circular ref, etc). Use full context without truncation.
         }
       }
 
