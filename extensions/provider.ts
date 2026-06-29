@@ -32,11 +32,46 @@ import { isRateLimited, markRateLimited, isRateLimitError, isTransientError } fr
 // Helpers (provider-local — generic helpers live in ./config.ts)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Smart model lookup — handles OpenRouter's upstream-prefixed model IDs
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a model in the registry with smart fallback.
+ *
+ * Some providers (notably OpenRouter) register models with upstream-prefixed
+ * IDs like `"deepseek/deepseek-v4-flash"` or `"openrouter/owl-alpha"`.
+ * Users can write config refs in either format:
+ *   - Full:   `"openrouter/deepseek/deepseek-v4-flash"`  (explicit)
+ *   - Short:  `"openrouter/owl-alpha"`                   (missing upstream prefix)
+ *
+ * The short form fails `registry.find` because the model ID is
+ * `"openrouter/owl-alpha"`, not `"owl-alpha"`.  This function:
+ *   1. Tries exact lookup first.
+ *   2. If that fails, tries prepending the provider name as upstream prefix.
+ */
+const findModel = (
+  registry: ModelRegistry,
+  provider: string,
+  modelId: string,
+): ReturnType<ModelRegistry['find']> => {
+  // 1. Exact match
+  const m = registry.find(provider, modelId);
+  if (m) return m;
+
+  // 2. Try prepending provider as upstream prefix (handles OpenRouter)
+  const prefixedId = `${provider}/${modelId}`;
+  const m2 = registry.find(provider, prefixedId);
+  if (m2) return m2;
+
+  return null;
+};
+
 /** Check whether the model referenced by a canonical ref supports image input. */
 const modelSupportsImage = (ref: string, registry: ModelRegistry | null): boolean => {
   const resolved = resolveModelRef(ref, registry);
   if (!resolved || !registry) return false;
-  const m = registry.find(resolved.provider, resolved.modelId);
+  const m = findModel(registry, resolved.provider, resolved.modelId);
   return m?.input?.includes('image') ?? false;
 };
 
@@ -159,6 +194,185 @@ const pushTextBlock = (
   stream.push({ type: 'text_end', contentIndex: ci, content: text, partial: { ...output } });
 };
 
+// ---------------------------------------------------------------------------
+// Auth cache — avoid redundant getApiKeyAndHeaders calls per session
+// ---------------------------------------------------------------------------
+
+interface CachedAuth {
+  apiKey: string;
+  headers: Record<string, string>;
+}
+
+const authCache = new Map<string, CachedAuth>();
+
+/**
+ * Get auth for a model, using in-memory cache per session.
+ * Cache key is `${provider}/${modelId}`.
+ */
+async function getCachedAuth(
+  targetModel: Model<Api>,
+  registry: ModelRegistry,
+): Promise<{ apiKey: string; headers: Record<string, string> } | null> {
+  const cacheKey = `${targetModel.provider}/${targetModel.id}`;
+  const cached = authCache.get(cacheKey);
+  if (cached) return cached;
+
+  const auth = await registry.getApiKeyAndHeaders(targetModel);
+  if (!auth || !auth.ok || !auth.apiKey) return null;
+
+  const result: CachedAuth = { apiKey: auth.apiKey, headers: auth.headers };
+  authCache.set(cacheKey, result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Timeout / abort helpers
+// ---------------------------------------------------------------------------
+
+/** Error class for router-level timeouts (pi aborted the request). */
+class RouterAbortError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'RouterAbortError';
+  }
+}
+
+/** Error class for per-model timeout (model too slow to start). */
+class ModelTimeoutError extends Error {
+  constructor(ref: string, elapsedMs: number) {
+    super(`${ref} timeout after ${(elapsedMs / 1000).toFixed(1)}s`);
+    this.name = 'ModelTimeoutError';
+  }
+}
+
+/**
+ * Check abort signal and throw RouterAbortError if pi has cancelled.
+ * Call after every await in the fallback loop.
+ */
+function checkAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new RouterAbortError(
+      'Pi membatalkan request (timeout). ' +
+      'Model terlalu lambat merespon melalui chain fallback.',
+    );
+  }
+}
+
+/**
+ * Attempt one model in the chain with abort awareness.
+ * Returns true if the model succeeded (outer loop should stop).
+ * Throws on abort (pi-level timeout), returns false on delegation failure.
+ */
+async function tryModel(
+  ref: string,
+  targetModel: Model<Api>,
+  ctx: Context,
+  options: SimpleStreamOptions | undefined,
+  reasoningOption: Record<string, unknown>,
+  stream: AssistantMessageEventStream,
+  output: AssistantMessage,
+  config: RouterConfig,
+  registry: ModelRegistry,
+  refIdx: number,
+  totalRefs: number,
+  elapsedStart: number,
+): Promise<boolean> {
+  const signal = options?.signal;
+
+  // Check aborted BEFORE attempting this model
+  checkAborted(signal);
+
+  // Auth (cached per provider/model across the session)
+  const auth = await getCachedAuth(targetModel, registry);
+  checkAborted(signal);
+
+  if (!auth) {
+    throw new Error(`Auth gagal untuk ${ref}`);
+  }
+
+  const delegatedStream = streamSimple(targetModel, ctx, {
+    ...options,
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    ...reasoningOption,
+  });
+
+  // Race: actual stream vs abort signal
+  // We iterate the stream but also check signal between events
+  let contentReceived = false;
+  const iterator = delegatedStream[Symbol.asyncIterator]();
+
+  while (true) {
+    checkAborted(signal);
+
+    const nextPromise = iterator.next();
+
+    // Race the next event against the abort signal
+    // If signal fires while waiting for next event, pi timed us out
+    let result: IteratorResult<AssistantMessageEventStream[0]>;
+    if (signal) {
+      // If signal is already aborted, fail fast without waiting
+      if (signal.aborted) {
+        // Cancel the pending iterator — fire-and-forget, stream cleanup is best-effort
+        result = { done: true, value: undefined as any };
+      } else {
+        // Wait for next event OR abort, whichever comes first
+        result = await Promise.race([
+          nextPromise,
+          new Promise<never>((_, reject) => {
+            const onAbort = () => {
+              signal.removeEventListener('abort', onAbort);
+              reject(new RouterAbortError(
+                'Pi membatalkan request saat menunggu stream dari ' + ref,
+              ));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          }),
+        ]);
+      }
+    } else {
+      result = await nextPromise;
+    }
+
+    // Check aborted again after await
+    checkAborted(signal);
+
+    if (result.done) break;
+
+    const event = result.value;
+
+    // If error arrives before any content, treat as delegation failure
+    if (event.type === 'error' && !contentReceived) {
+      const errMsg = event.error.errorMessage ?? `Model ${ref} failed before sending content`;
+      // Classify: if it's an abort/aborted, treat as RouterAbortError
+      if (event.reason === 'aborted') {
+        throw new RouterAbortError(errMsg);
+      }
+      throw new Error(errMsg);
+    }
+
+    if (
+      event.type === 'text_delta' ||
+      event.type === 'thinking_delta' ||
+      event.type === 'toolcall_delta' ||
+      event.type === 'toolcall_end'
+    ) {
+      contentReceived = true;
+    }
+
+    stream.push(event);
+
+    if (event.type === 'done') {
+      stream.end();
+      return true; // success, outer loop should exit
+    }
+  }
+
+  // Stream ended naturally (no done event — shouldn't happen)
+  stream.end();
+  return true;
+}
+
 /** The router's streamSimple: iterate fallback chain and delegate. */
 const routeStream = (
   model: Model<Api>,
@@ -218,16 +432,39 @@ const routeStream = (
     const output = createEmptyMessage(model);
     stream.push({ type: 'start', partial: output });
 
+    // Track elapsed time for diagnostics
+    const elapsedStart = Date.now();
+
     let lastError: Error | undefined;
     let allCooldown = true;
 
+    // Check if pi already aborted before any work
+    try { checkAborted(options?.signal); } catch (e) {
+      const err = e as Error;
+      stream.push({
+        type: 'error',
+        reason: 'error',
+        error: createErrorMessage(model,
+          `Request sudah dibatalkan sebelum fallback dimulai: ${err.message}`),
+      });
+      stream.end();
+      return;
+    }
+
     for (let i = 0; i < candidates.length; i++) {
       const ref = candidates[i];
+      const isLast = i === candidates.length - 1;
+
+      // --- Abort check before each candidate ---
+      try { checkAborted(options?.signal); } catch (e) {
+        lastError = e as Error;
+        break;
+      }
 
       // --- Cooldown check (skip if still in cooldown) ---
       if (isRateLimited(ref)) {
         lastError = new Error(`${ref} lagi cooldown`);
-        if (i < candidates.length - 1) {
+        if (!isLast) {
           const nextRef = candidates[i + 1];
           pushTextBlock(
             stream,
@@ -242,26 +479,32 @@ const routeStream = (
       const resolved = resolveModelRef(ref, registry);
       if (!resolved) {
         lastError = new Error(`Unknown model: ${ref}`);
-        if (i < candidates.length - 1) {
+        if (!isLast) {
           pushTextBlock(stream, output, `\n⚠️ ${ref} tidak dikenal, skip\n`);
         }
         continue;
       }
 
-      const targetModel = registry.find(resolved.provider, resolved.modelId);
+      const targetModel = findModel(registry, resolved.provider, resolved.modelId);
       if (!targetModel) {
         lastError = new Error(`Model not found in registry: ${ref}`);
         continue;
       }
 
-      // Auth
-      const auth = await registry.getApiKeyAndHeaders(targetModel);
-      if (!auth || !auth.ok || !auth.apiKey) {
+      // Auth (cached per provider/model across the session)
+      const auth = await getCachedAuth(targetModel, registry);
+      if (!auth) {
         lastError = new Error(`Auth gagal untuk ${ref}`);
-        if (i < candidates.length - 1) {
+        if (!isLast) {
           pushTextBlock(stream, output, `\n🔑 ${ref} gagal auth, skip\n`);
         }
         continue;
+      }
+
+      // Abort check after auth
+      try { checkAborted(options?.signal); } catch (e) {
+        lastError = e as Error;
+        break;
       }
 
       // Thinking degradation — cap to the model's maximum supported level
@@ -270,18 +513,25 @@ const routeStream = (
         if (userThinking === 'off') {
           effectiveThinking = undefined;
         } else {
-          const maxLevel = getMaxThinkingLevel(targetModel);
-          if (maxLevel === 'off') {
-            // Model doesn't support reasoning at all
+          // Known thinking levels with capability ordering
+          const ORDER: Record<string, number> = {
+            off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5,
+          };
+          // If thinking is set to a non-standard value like "default",
+          // treat it as "inherit from pi settings" — skip override.
+          if (!(userThinking in ORDER)) {
             effectiveThinking = undefined;
           } else {
-            // Compare ordering: higher index = higher capability
-            const ORDER: Record<string, number> = {
-              off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5,
-            };
-            const userIdx = ORDER[userThinking] ?? 0;
-            const maxIdx = ORDER[maxLevel] ?? 0;
-            effectiveThinking = userIdx <= maxIdx ? userThinking : maxLevel;
+            const maxLevel = getMaxThinkingLevel(targetModel);
+            if (maxLevel === 'off') {
+              // Model doesn't support reasoning at all
+              effectiveThinking = undefined;
+            } else {
+              // Compare ordering: higher index = higher capability
+              const userIdx = ORDER[userThinking] ?? 0;
+              const maxIdx = ORDER[maxLevel] ?? 0;
+              effectiveThinking = userIdx <= maxIdx ? userThinking : maxLevel;
+            }
           }
         }
       }
@@ -300,73 +550,76 @@ const routeStream = (
         }
       }
 
+      const reasoningOption = effectiveThinking
+        ? { reasoning: effectiveThinking as AiThinkingLevel }
+        : {};
+
       try {
-        const reasoningOption = effectiveThinking
-          ? { reasoning: effectiveThinking as AiThinkingLevel }
-          : {};
-
-        const delegatedStream = streamSimple(targetModel, ctx, {
-          ...options,
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          ...reasoningOption,
-        });
-
-        let contentReceived = false;
-        for await (const event of delegatedStream) {
-          // If error arrives before any content, treat as delegation failure
-          if (event.type === 'error' && !contentReceived) {
-            throw new Error(
-              event.error.errorMessage ?? `Model ${ref} failed before sending content`,
-            );
-          }
-          if (
-            event.type === 'text_delta' ||
-            event.type === 'thinking_delta' ||
-            event.type === 'toolcall_delta' ||
-            event.type === 'toolcall_end'
-          ) {
-            contentReceived = true;
-          }
-          stream.push(event);
-          if (event.type === 'done') {
-            stream.end();
-            return; // success
-          }
-        }
-        // Stream ended without a done event (shouldn't happen)
-        stream.end();
-        return;
+        const succeeded = await tryModel(
+          ref, targetModel, ctx, options, reasoningOption,
+          stream, output, config, registry,
+          i, candidates.length, elapsedStart,
+        );
+        if (succeeded) return; // outer IIFE returns, stream already ended inside tryModel
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
 
-        // Cooldown only for transient server-side errors (rate limit, 5xx, timeout).
-        // Permanent errors (model not found, auth failure, invalid ref) skip cooldown
-        // so they fail fast every time instead of clogging the chain.
-        if (isTransientError(lastError)) {
+        // Determine failure type for messaging
+        const isAbort = lastError instanceof RouterAbortError;
+        const isTimeout = lastError instanceof ModelTimeoutError;
+
+        // Cooldown only for transient errors (rate limit, 5xx, timeout)
+        // RouterAbortError (pi timeout) is NOT a transient model error —
+        // don't cooldown, just fail fast.
+        if (!isAbort && isTransientError(lastError)) {
           markRateLimited(ref, config.rateLimitCooldownMs);
         }
 
-        const isLast = i === candidates.length - 1;
         if (!isLast) {
           const nextRef = candidates[i + 1];
-          const prefix = isRateLimitError(lastError) ? '🚫' : '⚠️';
-          const cause = isRateLimitError(lastError) ? ' (rate limit)' : '';
+          let prefix = '⚠️';
+          let cause = '';
+          if (isAbort) {
+            prefix = '⏰';
+            cause = ' (request dibatalkan pi)';
+          } else if (isTimeout) {
+            prefix = '⏰';
+            cause = ' (timeout)';
+          } else if (isRateLimitError(lastError)) {
+            prefix = '🚫';
+            cause = ' (rate limit)';
+          }
           pushTextBlock(
             stream,
             output,
             `\n${prefix} ${ref} gagal${cause}, fallback ke ${nextRef}\n`,
           );
+        } else {
+          // Last model failed — is this an abort/timeout or real error?
+          // We'll report it in the final error message
         }
       }
+
+      // If last model failed due to abort, don't bother with further candidates
+      if (lastError instanceof RouterAbortError) break;
     }
 
     // All fallbacks exhausted
-    const errorMsg = allCooldown
-      ? `Semua model di ${customName} sedang cooldown. Tunggu beberapa menit atau gunakan /router clearcache`
-      : lastError
-        ? `Semua model di ${customName} gagal. Terakhir: ${lastError.message}`
-        : `Semua model di ${customName} gagal`
+    const elapsed = ((Date.now() - elapsedStart) / 1000).toFixed(1);
+    let errorMsg: string;
+
+    if (allCooldown) {
+      errorMsg = `Semua model di ${customName} sedang cooldown. Tunggu beberapa menit atau gunakan /router clearcache`;
+    } else if (lastError instanceof RouterAbortError) {
+      errorMsg = `Request dibatalkan setelah ${elapsed}s: pi menghentikan permintaan. ` +
+        `Model terlalu lambat merespon melalui chain fallback. Coba model langsung atau tambah model yang lebih cepat.`;
+    } else if (lastError instanceof ModelTimeoutError) {
+      errorMsg = `Semua model di ${customName} timeout setelah ${elapsed}s. Terakhir: ${lastError.message}`;
+    } else {
+      errorMsg = lastError
+        ? `Semua model di ${customName} gagal setelah ${elapsed}s. Terakhir: ${lastError.message}`
+        : `Semua model di ${customName} gagal setelah ${elapsed}s`;
+    }
 
     stream.push({
       type: 'error',
