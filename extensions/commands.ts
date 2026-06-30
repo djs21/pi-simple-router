@@ -8,7 +8,7 @@ import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME, PROVIDER_NAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
-import { getActiveRateLimits, clearRateLimits } from './rate-limit-tracker.js'
+import { getActiveRateLimits, clearRateLimits, isRateLimited } from './rate-limit-tracker.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -447,13 +447,14 @@ export function registerCommands(
 
       if (subcmd === 'reload') {
         await reloadConfig()
-        // Update fallback chain status if a router model is active
+        // Update active model status if a router model is active
         const model = (ctx as any).model
         if (model?.provider === PROVIDER_NAME) {
           const config = getMerged()
           const cfg = config.models[model.id]
           if (cfg) {
-            ctx.ui.setStatus('router-chain', `📎 ${cfg.models.join(' → ')}`)
+            const active = cfg.models.find((ref: string) => !isRateLimited(ref))
+            ctx.ui.setStatus('router-chain', active ? `📎 ${active}` : '📎 (semua cooldown)')
           }
         }
         ctx.ui.notify('🔄 Router config reloaded', 'info')

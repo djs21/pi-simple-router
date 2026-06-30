@@ -5,6 +5,7 @@ import { registerRouterProvider } from './provider.js'
 import { registerCommands } from './commands.js'
 import { setStatusLine } from './ui.js'
 import { PROVIDER_NAME } from './constants.js'
+import { isRateLimited } from './rate-limit-tracker.js'
 
 export default function routerExtension(api: ExtensionAPI): void {
   // --- Closure state ---
@@ -43,13 +44,20 @@ export default function routerExtension(api: ExtensionAPI): void {
     console.error('[router-extension] Eager registration failed:', err),
   )
 
-  /** Update status to show fallback chain for current router model, or clear it. */
+  /** Update status to show which fallback model is currently active (first non-cooldowned). */
   function updateRouterChainStatus(ctx: ExtensionContext): void {
     const model = ctx.model
     if (model?.provider === PROVIDER_NAME) {
       const cfg = currentConfig.models[model.id]
       if (cfg) {
-        ctx.ui.setStatus('router-chain', `📎 ${cfg.models.join(' → ')}`)
+        // Find the first model NOT in cooldown — that's the one router will use
+        const active = cfg.models.find((ref) => !isRateLimited(ref))
+        if (active) {
+          ctx.ui.setStatus('router-chain', `📎 ${active}`)
+          return
+        }
+        // All models cooldowned
+        ctx.ui.setStatus('router-chain', '📎 (semua cooldown)')
         return
       }
     }
