@@ -1,0 +1,2 @@
+{"id":"int-7138241b","kind":"field_change","created_at":"2026-06-30T16:39:22.56538426Z","actor":"djs21","issue_id":"pi-model-router-olj","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"implemented: commit 0d7ea60"}}
+{"id":"int-161ed127","kind":"field_change","created_at":"2026-06-30T16:43:39.165248649Z","actor":"djs21","issue_id":"pi-model-router-by6","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"implemented: commit e3edd12 — cooldown untuk error-after-content"}}
