@@ -79,11 +79,47 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
+## Agent skills
+
+### Issue tracker
+
+This project uses **bd (beads)** for issue tracking.
+
+Quick reference:
+- `bd create "Title" --type task --priority 2` — Create a new issue
+- `bd create-form` — Interactive form
+- `bd label add <id> <label>` — Add label to issue
+- `bd set-state <id> <state>` — Set operational state
+- `bd close <id>` — Close issue
+- `bd list` — List open issues
+- `bd show <id>` — Show issue details
+- `bd ready` — Find unblocked work
+- `bd github sync` — Sync with GitHub (when needed)
+
+### Triage labels
+
+Five canonical triage roles, all using default strings:
+
+| Role | Label | Meaning |
+|---|---|---|
+| Needs evaluation | `needs-triage` | Maintainer needs to evaluate this issue |
+| Waiting on reporter | `needs-info` | Waiting for more information |
+| Ready for AFK agent | `ready-for-agent` | Fully specified, AFK-ready |
+| Needs human | `ready-for-human` | Requires human implementation |
+| Won't fix | `wontfix` | Will not be actioned |
+
+### Domain docs
+
+Single-context layout:
+- `CONTEXT.md` at repo root (not yet created — created lazily by /grill-with-docs when terms get resolved)
+- `docs/adr/` for architectural decisions (not yet created)
+- Skills that read domain docs will look for these files and proceed silently if absent
+
 ## Child DOX Index
 
 | Path | Scope |
 |---|---|
-| `docs/` | Project documentation, plans, ADRs. See `docs/plan.md` for current implementation plan. |
+| `docs/` | Project documentation, plans, ADRs, PRDs. See `docs/plan.md` for implementation plan and `docs/prd-error-state-invisibility.md` for the error invisibility PRD. |
 | `extensions/` | Extension source code + tests (10 modules, ~1000 lines). Custom model router pi extension with fallback chain. Vitest unit tests in `*.test.ts`. See `docs/plan.md` for full spec. |
 | `README.md` | Project overview, instalasi, konfigurasi, usage, commands, features, development guide, dan lisensi dalam Bahasa Indonesia. |
 | `package.json` | Root project manifest: pi extension registration, scripts (`npm test` → vitest, `npm run typecheck` → tsc), devDependencies. |

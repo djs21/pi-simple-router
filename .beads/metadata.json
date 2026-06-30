@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pi_model_router",
+  "project_id": "55e414df-7eb5-4f01-88f3-2b5ef6e8d4c7"
+}
