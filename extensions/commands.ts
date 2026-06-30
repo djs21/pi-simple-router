@@ -6,7 +6,7 @@ import type { AutocompleteItem } from '@earendil-works/pi-tui'
 import { showModelSelector, buildModelOptions } from './model-selector.js'
 import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
-import { CONFIG_FILENAME } from './constants.js'
+import { CONFIG_FILENAME, PROVIDER_NAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
 import { getActiveRateLimits, clearRateLimits } from './rate-limit-tracker.js'
 
@@ -447,6 +447,15 @@ export function registerCommands(
 
       if (subcmd === 'reload') {
         await reloadConfig()
+        // Update fallback chain status if a router model is active
+        const model = (ctx as any).model
+        if (model?.provider === PROVIDER_NAME) {
+          const config = getMerged()
+          const cfg = config.models[model.id]
+          if (cfg) {
+            ctx.ui.setStatus('router-chain', `📎 ${cfg.models.join(' → ')}`)
+          }
+        }
         ctx.ui.notify('🔄 Router config reloaded', 'info')
         return
       }
