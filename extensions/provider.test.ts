@@ -11,19 +11,41 @@ vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
 }))
 
-vi.mock('@earendil-works/pi-ai', () => ({
-  createAssistantMessageEventStream: vi.fn(() => {
-    const stream = {
-      push: vi.fn(),
-      end: vi.fn(),
-    }
-    stream[Symbol.asyncIterator] = vi.fn()
-    return stream
-  }),
-}))
+vi.mock('@earendil-works/pi-ai', () => {
+  // Track end promises per-stream so tests can await async IIFE completion
+  const endResolveMap = new Map<symbol, () => void>()
+
+  return {
+    createAssistantMessageEventStream: vi.fn(() => {
+      const id = Symbol()
+      const endPromise = new Promise<void>(resolve => {
+        endResolveMap.set(id, resolve)
+      })
+
+      const stream = {
+        push: vi.fn(),
+        end: vi.fn(() => {
+          const resolve = endResolveMap.get(id)
+          if (resolve) {
+            endResolveMap.delete(id)
+            setTimeout(resolve, 0)
+          }
+        }),
+        /** @internal — tests await this to know when router IIFE completed */
+        [Symbol.asyncIterator]: vi.fn(),
+      }
+
+      // Attach endPromise so tests can await it
+      ;(stream as any)._endPromise = endPromise
+
+      return stream
+    }),
+  }
+})
 
 // Module under test — must come after vi.mock calls
 import { registerRouterProvider } from './provider'
+import { clearRateLimits, getActiveRateLimits } from './rate-limit-tracker'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -255,5 +277,306 @@ describe('registerRouterProvider', () => {
 
     const providerCfg = mockApi.registerProvider.mock.calls[0][1]
     expect(typeof providerCfg.streamSimple).toBe('function')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cooldown behaviour tests
+// ---------------------------------------------------------------------------
+describe('cooldown behaviour', () => {
+  const mockApi = { registerProvider: vi.fn() }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clearRateLimits()
+  })
+
+  /**
+   * Build a mock delegated stream that yields one event then ends.
+   */
+  function delegatedStream(
+    event: Record<string, unknown>,
+  ): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let yielded = false
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          if (!yielded) {
+            yielded = true
+            return Promise.resolve({ done: false, value: event })
+          }
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  /**
+   * Build a mock delegated stream that yields text_delta then error then ends.
+   */
+  function delegatedStreamWithContent(
+    firstEvent: Record<string, unknown>,
+    secondEvent: Record<string, unknown>,
+  ): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let step = 0
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          step++
+          if (step === 1) return Promise.resolve({ done: false, value: firstEvent })
+          if (step === 2) return Promise.resolve({ done: false, value: secondEvent })
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  /** Register router and return its streamSimple function + the stream._endPromise. */
+  function setupRouter(config: RouterConfig, registry: any) {
+    registerRouterProvider(mockApi as never, config, registry as never)
+    const providerCfg = mockApi.registerProvider.mock.calls[0][1]
+    return providerCfg
+  }
+
+  /** Create a delegated stream that succeeds (text_delta then done). */
+  function successStream(): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let step = 0
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          step++
+          if (step === 1)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'text_delta', contentIndex: 0, delta: 'hello' },
+            })
+          if (step === 2)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'done', partial: {} },
+            })
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // RED-GREEN 1: Non-transient error → markRateLimited
+  // -----------------------------------------------------------------------
+  it('marks a model with cooldown after a non-transient error before content', async () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    // Mock delegated streamSimple to return an error-before-content stream
+    // Error message deliberately does NOT match any TRANSIENT_PATTERNS
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      delegatedStream({
+        type: 'error',
+        reason: 'error',
+        error: { errorMessage: 'Model not found — invalid ref' },
+      }),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+
+    // Wait for the async IIFE to complete
+    await (stream as any)._endPromise
+
+    // Then check cooldown state
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+  })
+
+  // -----------------------------------------------------------------------
+  // RED-GREEN 2: Cross-turn — failed model skipped on next call
+  // -----------------------------------------------------------------------
+  it('skips a cooldowned model on the next streamSimple call', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4', 'anthropic/claude-3'] } },
+    }
+
+    const gpt4Model = mockModel({ id: 'gpt-4', provider: 'openai' })
+    const claudeModel = mockModel({ id: 'claude-3', provider: 'anthropic' })
+
+    const registry = {
+      find: vi.fn((_provider: string, modelId: string) => {
+        if (modelId === 'gpt-4') return gpt4Model
+        if (modelId === 'claude-3') return claudeModel
+        return undefined
+      }),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    const delegatedCalls: string[] = []
+
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockImplementation(
+      (model: any) => {
+        delegatedCalls.push(model.id)
+        if (model.id === 'gpt-4') {
+          return delegatedStream({
+            type: 'error',
+            reason: 'error',
+            error: { errorMessage: 'Model not found' },
+          })
+        }
+        return successStream()
+      },
+    )
+
+    const providerCfg = setupRouter(config, registry)
+
+    const routerModel: any = {
+      id: 'test',
+      provider: 'router',
+      api: 'router-local-api',
+    }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    // ---- Call 1: gpt-4 fails → cooldown, claude-3 succeeds ----
+    const stream1 = providerCfg.streamSimple(routerModel, ctx, {})
+    await (stream1 as any)._endPromise
+
+    expect(getActiveRateLimits().length).toBe(1)
+    expect(getActiveRateLimits()[0].ref).toBe('openai/gpt-4')
+    // gpt-4 was delegated exactly once (in call 1)
+    expect(delegatedCalls.filter((c) => c === 'gpt-4').length).toBe(1)
+
+    // ---- Call 2: gpt-4 cooldowned → skip, claude-3 succeeds ----
+    const stream2 = providerCfg.streamSimple(routerModel, ctx, {})
+    await (stream2 as any)._endPromise
+
+    // gpt-4 should NOT be delegated again — it was skipped by isRateLimited
+    expect(delegatedCalls.filter((c) => c === 'gpt-4').length).toBe(1)
+  })
+
+  // -----------------------------------------------------------------------
+  // Regression: transient error (rate limit) still triggers cooldown
+  // -----------------------------------------------------------------------
+  it('still marks transient errors with cooldown (regression)', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      delegatedStream({
+        type: 'error',
+        reason: 'error',
+        error: { errorMessage: '429 Too Many Requests' },
+      }),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+  })
+
+  // -----------------------------------------------------------------------
+  // Regression: RouterAbortError does NOT trigger cooldown
+  // -----------------------------------------------------------------------
+  it('does not cooldown on RouterAbortError (pi-level timeout)', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      delegatedStream({
+        type: 'error',
+        reason: 'aborted',
+        error: { errorMessage: 'Request aborted by pi' },
+      }),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // No cooldown should be applied for aborted requests
+    expect(getActiveRateLimits().length).toBe(0)
+  })
+
+  // -----------------------------------------------------------------------
+  // Regression: provider-level error also cooldowns the provider
+  // -----------------------------------------------------------------------
+  it('cooldowns both model and provider on provider-level error', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      delegatedStream({
+        type: 'error',
+        reason: 'error',
+        error: { errorMessage: '502 Bad Gateway' },
+      }),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(2)
+    expect(limits.some((l) => l.ref === 'openai/gpt-4')).toBe(true)
+    expect(limits.some((l) => l.ref === '__provider:openai')).toBe(true)
   })
 })

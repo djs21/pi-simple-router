@@ -26,7 +26,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, isRateLimitError, isTransientError, getRemainingCooldownMs } from './rate-limit-tracker';
+import { isRateLimited, markRateLimited, isRateLimitError, getRemainingCooldownMs } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -604,10 +604,10 @@ const routeStream = (
         const isAbort = lastError instanceof RouterAbortError;
         const isTimeout = lastError instanceof ModelTimeoutError;
 
-        // Cooldown only for transient errors (rate limit, 5xx, timeout)
-        // RouterAbortError (pi timeout) is NOT a transient model error —
-        // don't cooldown, just fail fast.
-        if (!isAbort && isTransientError(lastError)) {
+        // Cooldown ALL model errors (not just transient) so failed models
+        // are skipped on subsequent turns. RouterAbortError (pi timeout) is
+        // NOT a model error — don't cooldown, just fail fast.
+        if (!isAbort) {
           // Cooldown model-level
           markRateLimited(ref, config.rateLimitCooldownMs);
           // Cooldown provider-level untuk infra errors (502, 503, 504, dll)
