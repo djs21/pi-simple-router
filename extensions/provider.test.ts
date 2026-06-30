@@ -579,4 +579,102 @@ describe('cooldown behaviour', () => {
     expect(limits.some((l) => l.ref === 'openai/gpt-4')).toBe(true)
     expect(limits.some((l) => l.ref === '__provider:openai')).toBe(true)
   })
+
+  // -----------------------------------------------------------------------
+  // SLICE 2: Error after content → markRateLimited
+  // -----------------------------------------------------------------------
+
+  /** Create a delegated stream that yields content, then error, then done. */
+  function errorAfterContentStream(
+    reason: string = 'error',
+    errorMessage: string = 'Mid-stream failure',
+  ): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let step = 0
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          step++
+          if (step === 1)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'text_delta', contentIndex: 0, delta: 'hello' },
+            })
+          if (step === 2)
+            return Promise.resolve({
+              done: false,
+              value: {
+                type: 'error',
+                reason,
+                error: { errorMessage },
+              },
+            })
+          if (step === 3)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'done', partial: {} },
+            })
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  it('marks a model with cooldown when error arrives after content (non-transient)', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      errorAfterContentStream('error', 'Model not found'),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+  })
+
+  it('does NOT cooldown when error-after-content is abort/aborted', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      errorAfterContentStream('aborted', 'Request aborted by pi'),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Aborted request + content already sent → no cooldown
+    expect(getActiveRateLimits().length).toBe(0)
+  })
 })

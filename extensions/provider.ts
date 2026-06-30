@@ -382,6 +382,13 @@ async function tryModel(
 
     stream.push(event);
 
+    // Error after content: model produced some output then failed.
+    // Cooldown it so it is skipped on subsequent turns.
+    // (Error-before-content throws to the routeStream catch block instead.)
+    if (event.type === 'error' && contentReceived && event.reason !== 'aborted') {
+      markRateLimited(ref, config.rateLimitCooldownMs);
+    }
+
     if (event.type === 'done') {
       stream.end();
       return true; // success, outer loop should exit
