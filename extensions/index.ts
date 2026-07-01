@@ -79,6 +79,10 @@ export default function routerExtension(api: ExtensionAPI): void {
     updateRouterChainStatus(ctx)
   })
 
+  api.on('turn_start', (_event: unknown, ctx: ExtensionContext) => {
+    updateRouterChainStatus(ctx)
+  })
+
   api.on('session_shutdown', () => {
     // nothing to clean up
   })

@@ -26,18 +26,11 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, isRateLimitError, getRemainingCooldownMs } from './rate-limit-tracker';
+import { isRateLimited, markRateLimited, isRateLimitError } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
 // ---------------------------------------------------------------------------
-
-/** Format milliseconds to human-readable duration (e.g. "3m 24s"). */
-const formatDuration = (ms: number): string => {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
-};
 
 /** Error patterns indicating a provider-wide outage (not model-specific). */
 const PROVIDER_LEVEL_PATTERNS = [
@@ -497,34 +490,16 @@ const routeStream = (
       }
 
       // --- Cooldown check (model-level) ---
+      // Skip silently — no text block noise every turn.
+      // Footer via turn_start shows the active model; /router status shows details.
       if (isRateLimited(ref)) {
-        const remainingMs = getRemainingCooldownMs(ref) ?? 0;
-        const remainingStr = formatDuration(remainingMs);
-        lastError = new Error(`${ref} lagi cooldown (sisa ${remainingStr})`);
-        if (!isLast) {
-          const nextRef = candidates[i + 1];
-          pushTextBlock(
-            stream,
-            output,
-            `\n⏳ ${ref} cooldown (sisa ${remainingStr}), skip ke ${nextRef}\n`,
-          );
-        }
+        lastError = new Error(`${ref} lagi cooldown`);
         continue;
       }
 
       // --- Cooldown check (provider-level) ---
       if (isRateLimited(`__provider:${resolved.provider}`)) {
-        const remainingMs = getRemainingCooldownMs(`__provider:${resolved.provider}`) ?? 0;
-        const remainingStr = formatDuration(remainingMs);
-        lastError = new Error(`Provider ${resolved.provider} sedang cooldown (sisa ${remainingStr})`);
-        if (!isLast) {
-          const nextRef = candidates[i + 1];
-          pushTextBlock(
-            stream,
-            output,
-            `\n⏳ ${resolved.provider} cooldown (provider, sisa ${remainingStr}), skip ke ${nextRef}\n`,
-          );
-        }
+        lastError = new Error(`Provider ${resolved.provider} sedang cooldown`);
         continue;
       }
 
