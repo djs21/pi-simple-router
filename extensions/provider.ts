@@ -23,10 +23,11 @@ import {
   type ModelThinkingLevel,
 } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { RouterConfig } from './types';
+import type { RouterConfig, KeyPoolConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
 import { isRateLimited, markRateLimited, isRateLimitError } from './rate-limit-tracker';
+import { ModelKeyPool } from './key-pool';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -289,14 +290,15 @@ async function tryModel(
   refIdx: number,
   totalRefs: number,
   elapsedStart: number,
+  keyPoolAuth?: { apiKey: string; headers: Record<string, string> } | null,
 ): Promise<boolean> {
   const signal = options?.signal;
 
   // Check aborted BEFORE attempting this model
   checkAborted(signal);
 
-  // Auth (cached per provider/model across the session)
-  const auth = await getCachedAuth(targetModel, registry);
+  // Auth: use keyPoolAuth if provided, otherwise resolve from cache/registry
+  const auth = keyPoolAuth ?? await getCachedAuth(targetModel, registry);
   checkAborted(signal);
 
   if (!auth) {
@@ -400,6 +402,7 @@ const routeStream = (
   options: SimpleStreamOptions | undefined,
   config: RouterConfig,
   registry: ModelRegistry | null,
+  keyPool?: ModelKeyPool | null,
 ): AssistantMessageEventStream => {
   const stream = createAssistantMessageEventStream();
 
@@ -509,9 +512,27 @@ const routeStream = (
         continue;
       }
 
-      // Auth (cached per provider/model across the session)
-      const auth = await getCachedAuth(targetModel, registry);
-      if (!auth) {
+      // Auth resolution: key pool → cached auth → registry fallback
+      let keyPoolAuth: { apiKey: string; headers: Record<string, string> } | null | undefined;
+      let usedPoolKey = false;
+
+      if (keyPool) {
+        const poolKey = keyPool.getNextKey(resolved.provider);
+        if (poolKey) {
+          keyPoolAuth = poolKey;
+          usedPoolKey = true;
+        } else {
+          // Pool exists but no key available → fallback to registry (skip cache)
+          const directAuth = await registry.getApiKeyAndHeaders(targetModel);
+          if (directAuth?.ok && directAuth.apiKey) {
+            keyPoolAuth = { apiKey: directAuth.apiKey, headers: directAuth.headers };
+          }
+        }
+      } else {
+        keyPoolAuth = await getCachedAuth(targetModel, registry);
+      }
+
+      if (!keyPoolAuth) {
         lastError = new Error(`Auth gagal untuk ${ref}`);
         if (!isLast) {
           pushTextBlock(stream, output, `\n🔑 ${ref} gagal auth, skip\n`);
@@ -577,9 +598,25 @@ const routeStream = (
           ref, targetModel, ctx, options, reasoningOption,
           stream, output, config, registry,
           i, candidates.length, elapsedStart,
+          keyPoolAuth,
         );
-        if (succeeded) return; // outer IIFE returns, stream already ended inside tryModel
+        if (succeeded) {
+          // Mark key as healthy on success (if using key pool)
+          if (usedPoolKey && keyPool && keyPoolAuth) {
+            keyPool.markSuccess(resolved.provider, keyPoolAuth.apiKey);
+          }
+          return; // outer IIFE returns, stream already ended inside tryModel
+        }
       } catch (err) {
+        // Mark key as failed if using key pool
+        if (usedPoolKey && keyPool && keyPoolAuth) {
+          keyPool.markFailed(
+            resolved.provider,
+            keyPoolAuth.apiKey,
+            err instanceof Error ? err : new Error(String(err)),
+          );
+        }
+
         lastError = err instanceof Error ? err : new Error(String(err));
 
         // Determine failure type for messaging
@@ -670,6 +707,7 @@ export const registerRouterProvider = (
   api: ExtensionAPI,
   config: RouterConfig,
   modelRegistry: ModelRegistry | null,
+  keyPool?: ModelKeyPool | null,
 ): void => {
   const models = buildModels(config, modelRegistry);
 
@@ -679,6 +717,6 @@ export const registerRouterProvider = (
     api: 'router-local-api' as Api,
     models,
     streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream =>
-      routeStream(model, context, options, config, modelRegistry),
+      routeStream(model, context, options, config, modelRegistry, keyPool),
   });
 };

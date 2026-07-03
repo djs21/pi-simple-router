@@ -6,12 +6,15 @@ import { registerCommands } from './commands.js'
 import { setStatusLine } from './ui.js'
 import { PROVIDER_NAME } from './constants.js'
 import { isRateLimited } from './rate-limit-tracker.js'
+import { loadKeysConfig } from './keys-config.js'
+import { ModelKeyPool } from './key-pool.js'
 
 export default function routerExtension(api: ExtensionAPI): void {
   // --- Closure state ---
   let currentConfig: RouterConfig = { models: {} }
   let lastModelsFingerprint = ''
   let modelRegistry: any = null
+  let keyPool: ModelKeyPool | null = null
   // Track whether the most recent registerRouterProvider call had a null registry.
   // When registry becomes available later (on session_start), we need to re-register
   // to update the streamSimple closure with the real registry.
@@ -30,13 +33,23 @@ export default function routerExtension(api: ExtensionAPI): void {
       lastModelsFingerprint = computeFingerprint(config)
     }
 
+    // Load key pool config
+    const keysConfig = loadKeysConfig()
+    if (Object.keys(keysConfig.providers).length > 0) {
+      if (keyPool) {
+        keyPool.reload(keysConfig)
+      } else {
+        keyPool = new ModelKeyPool(keysConfig)
+      }
+    }
+
     const haveRegistryNow = !!modelRegistry
     // Re-register if: config changed, or registry transitions null → available
     const needsReRegister = configChanged || (!lastRegistrationHadRegistry && haveRegistryNow)
     if (!needsReRegister) return
 
     lastRegistrationHadRegistry = haveRegistryNow
-    registerRouterProvider(api, config, modelRegistry)
+    registerRouterProvider(api, config, modelRegistry, keyPool)
   }
 
   // --- Eager registration ---

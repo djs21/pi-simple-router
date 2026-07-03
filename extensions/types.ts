@@ -15,3 +15,21 @@ export interface RouterState {
 }
 
 export type SaveScope = 'global' | 'project'
+
+// ---------------------------------------------------------------------------
+// Key pool types
+// ---------------------------------------------------------------------------
+
+export type RotationStrategy = 'round-robin' | 'fallback'
+
+export interface ProviderKeyConfig {
+  keys: string[]
+  headers?: Record<string, string>
+  strategy?: RotationStrategy
+}
+
+export interface KeyPoolConfig {
+  providers: Record<string, ProviderKeyConfig>
+}
+
+export type KeyHealth = 'healthy' | 'cooldown' | 'dead'

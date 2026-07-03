@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { RouterConfig } from './types'
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants'
+import { ModelKeyPool } from './key-pool'
 
 // ---------------------------------------------------------------------------
 // Mock pi SDK modules — these are hoisted before any real imports.
@@ -676,5 +677,310 @@ describe('cooldown behaviour', () => {
 
     // Aborted request + content already sent → no cooldown
     expect(getActiveRateLimits().length).toBe(0)
+  })
+})
+
+// -----------------------------------------------------------------------
+// Cycles 22-27: Key pool integration
+// -----------------------------------------------------------------------
+describe('key pool integration', () => {
+  const mockApi = { registerProvider: vi.fn() }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clearRateLimits()
+  })
+
+  /** Create a delegated stream that succeeds (text_delta then done). */
+  function successStream(): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let step = 0
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          step++
+          if (step === 1)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'text_delta', contentIndex: 0, delta: 'hello' },
+            })
+          if (step === 2)
+            return Promise.resolve({
+              done: false,
+              value: { type: 'done', partial: {} },
+            })
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  /** Create a delegated stream that errors before content. */
+  function errorStream(): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    let step = 0
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          step++
+          if (step === 1)
+            return Promise.resolve({
+              done: false,
+              value: {
+                type: 'error',
+                reason: 'error',
+                error: { errorMessage: 'Model error' },
+              },
+            })
+          return Promise.resolve({ done: true, value: undefined })
+        },
+      }),
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Cycle 22: tryModel with keyPoolAuth passes credentials to stream
+  // -----------------------------------------------------------------------
+  it('uses key pool apiKey when keyPoolAuth is provided', async () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'registry-key', headers: {} }),
+    }
+
+    // Create a real key pool
+    const keyPool = new ModelKeyPool({
+      providers: {
+        openai: { keys: ['pool-key'] },
+      },
+    })
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(successStream())
+
+    // Register with keyPool
+    registerRouterProvider(
+      mockApi as never,
+      config,
+      registry as never,
+      keyPool,
+    )
+
+    const providerCfg = mockApi.registerProvider.mock.calls[0][1]
+    const model: any = {
+      id: 'test',
+      provider: 'router',
+      api: 'router-local-api',
+    }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Find the gpt-4 call to delegated streamSimple
+    const calls = (streamSimple as ReturnType<typeof vi.fn>).mock.calls
+    const gpt4Call = calls.find(
+      (c: any[]) => c[0]?.id === 'gpt-4',
+    )
+    expect(gpt4Call).toBeDefined()
+    // Should use pool-key, not registry-key
+    expect(gpt4Call![2].apiKey).toBe('pool-key')
+  })
+
+  // -----------------------------------------------------------------------
+  // Cycle 23: routeStream passes keyPoolAuth from pool to tryModel
+  // (verified by Cycle 22 test above — the wiring is the same)
+  // -----------------------------------------------------------------------
+
+  // -----------------------------------------------------------------------
+  // Cycle 24: No key pool → no breaking change (regression guard)
+  // Verified by all existing 17 tests passing. No additional test needed.
+  // -----------------------------------------------------------------------
+
+  // -----------------------------------------------------------------------
+  // Cycle 25: Stream error triggers fallback to next model
+  // -----------------------------------------------------------------------
+  it('falls back to next model when key pool model errors', async () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4', 'anthropic/claude-3'] } },
+    }
+
+    const gpt4Model = mockModel({ id: 'gpt-4', provider: 'openai' })
+    const claudeModel = mockModel({ id: 'claude-3', provider: 'anthropic' })
+
+    const registry = {
+      find: vi.fn((_p: string, modelId: string) => {
+        if (modelId === 'gpt-4') return gpt4Model
+        if (modelId === 'claude-3') return claudeModel
+        return undefined
+      }),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    // Key pool has key for openai only
+    const keyPool = new ModelKeyPool({
+      providers: {
+        openai: { keys: ['pool-key'] },
+      },
+    })
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    const delegatedCalls: string[] = []
+
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockImplementation(
+      (model: any) => {
+        delegatedCalls.push(model.id)
+        if (model.id === 'gpt-4') {
+          return errorStream()
+        }
+        return successStream()
+      },
+    )
+
+    registerRouterProvider(
+      mockApi as never,
+      config,
+      registry as never,
+      keyPool,
+    )
+
+    const providerCfg = mockApi.registerProvider.mock.calls[0][1]
+    const model: any = {
+      id: 'test',
+      provider: 'router',
+      api: 'router-local-api',
+    }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Both models should have been delegated
+    expect(delegatedCalls.filter((c) => c === 'gpt-4').length).toBe(1)
+    expect(delegatedCalls.filter((c) => c === 'claude-3').length).toBe(1)
+  })
+
+  // -----------------------------------------------------------------------
+  // Cycle 26: Stream success restores key health
+  // -----------------------------------------------------------------------
+  it('marks key healthy on success after prior failure', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const keyPool = new ModelKeyPool({
+      providers: {
+        openai: { keys: ['pool-key'] },
+      },
+    })
+
+    // Mark key failed then advance time past cooldown for lazy recovery
+    keyPool.markFailed('openai', 'pool-key', new Error('429 Too Many Requests'))
+    expect(keyPool.getNextKey('openai')).toBeNull()
+
+    // Advance time so lazy recovery kicks in
+    vi.advanceTimersByTime(60_001)
+    // Now getNextKey returns the key (lazy recovery)
+    expect(keyPool.getNextKey('openai')).toEqual({
+      apiKey: 'pool-key',
+      headers: {},
+    })
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(successStream())
+
+    registerRouterProvider(
+      mockApi as never,
+      config,
+      registry as never,
+      keyPool,
+    )
+
+    const providerCfg = mockApi.registerProvider.mock.calls[0][1]
+    const model: any = {
+      id: 'test',
+      provider: 'router',
+      api: 'router-local-api',
+    }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    vi.useRealTimers()
+
+    // After stream success, key should be healthy
+    const status = keyPool.getStatus()
+    const openaiStatus = status.find((s) => s.provider === 'openai')
+    expect(openaiStatus!.health['pool-key']).toBe('healthy')
+  })
+
+  // -----------------------------------------------------------------------
+  // Cycle 27: All keys dead → fallback to registry still works
+  // -----------------------------------------------------------------------
+  it('falls back to registry when key pool has no usable keys', async () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'registry-fallback', headers: { 'X-Registry': 'yes' } }),
+    }
+
+    // Key pool has openai provider but key is in cooldown
+    const keyPool = new ModelKeyPool({
+      providers: {
+        openai: { keys: ['pool-key'] },
+      },
+    })
+    // Mark the key failed so getNextKey returns null
+    keyPool.markFailed('openai', 'pool-key', new Error('429 Too Many Requests'))
+    expect(keyPool.getNextKey('openai')).toBeNull()
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(successStream())
+
+    registerRouterProvider(
+      mockApi as never,
+      config,
+      registry as never,
+      keyPool,
+    )
+
+    const providerCfg = mockApi.registerProvider.mock.calls[0][1]
+    const model: any = {
+      id: 'test',
+      provider: 'router',
+      api: 'router-local-api',
+    }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Registry.getApiKeyAndHeaders should have been called (fallback path)
+    expect(registry.getApiKeyAndHeaders).toHaveBeenCalled()
+
+    // Stream should have succeeded with registry key
+    const calls = (streamSimple as ReturnType<typeof vi.fn>).mock.calls
+    const gpt4Call = calls.find(
+      (c: any[]) => c[0]?.id === 'gpt-4',
+    )
+    expect(gpt4Call).toBeDefined()
+    expect(gpt4Call![2].apiKey).toBe('registry-fallback')
   })
 })
