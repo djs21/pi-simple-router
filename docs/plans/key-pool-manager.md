@@ -75,7 +75,17 @@ Yang dimau:
 | `providers` | Yes | — | Object key = provider name (sama kayak di pi: `openrouter`, `opencode-go`, dll) |
 | `providers[].keys` | Yes | — | Array of API keys. Urutan = prioritas buat `fallback`, giliran buat `round-robin` |
 | `providers[].strategy` | No | `"round-robin"` | `"round-robin"` — gantian. `"fallback"` — pake key1 dulu, baru key2 kalo error |
-| `providers[].headers` | No | `{}` | Custom headers buat provider itu (kayak HTTP-Referer buat OpenRouter) |
+| `providers[].headers` | No | `{}` | Custom headers buat provider itu (kayak HTTP-Referer buat OpenRouter). **Key pool headers fully replace pi built-in headers** untuk provider yang dikelola key pool. Gak ada deep merge — user explicit configure di file ini, jadi yang dipake dari sini. |
+
+### Security Warning: Git Exposure
+
+> **⚠️ JANGAN commit `.pi/router-keys.json` ke git.** File ini berisi API keys plaintext.
+>
+> **Rekomendasi:**
+> 1. Simpan keys di **global scope** (`~/.pi/agent/router-keys.json`) — aman dari git.
+> 2. Project scope (`.pi/router-keys.json`) hanya untuk override konfigurasi kalo terpaksa.
+> 3. File `router-keys.json` harus ditambahkan ke `.gitignore`.
+> 4. Set permission: `chmod 600 .pi/router-keys.json`
 
 ---
 
@@ -128,24 +138,89 @@ class ModelKeyPool {
 - `resolveKeyPath(scope)` — dapatkan path file
 
 #### `provider.ts` (MODIF)
-Di `routeStream`, ganti auth lookup:
-```typescript
-// OLD:
-const auth = await getCachedAuth(targetModel, registry);
 
-// NEW:
+Ada 3 perubahan di `provider.ts`:
+
+**a. Auth lookup — pake key pool, pass ke `tryModel`:**
+
+```typescript
+// Di routeStream, pas mau panggil tryModel:
+
+// Ambil auth dari key pool (kalo provider terdaftar)
 const keyAuth = keyPool?.getNextKey(targetModel.provider);
-const auth = keyAuth ?? await getCachedAuth(targetModel, registry);
+
+// Pass keyAuth sebagai parameter ke tryModel
+const succeeded = await tryModel(
+  ref, targetModel, ctx, options, reasoningOption,
+  stream, output, config, registry,
+  i, candidates.length, elapsedStart,
+  keyAuth,  // ← PARAMETER BARU: auth dari key pool (atau null)
+);
 ```
 
-Kalo key pool gak punya provider itu → fallback ke pi built-in auth = **no breaking change**.
+**b. Di `tryModel()`, ganti auth lookup pake parameter:**
 
-Pas key gagal (di catch block):
 ```typescript
-if (keyAuth && isTransientError(err)) {
-  keyPool.markFailed(targetModel.provider, keyAuth.apiKey, err);
+async function tryModel(
+  ref: string,
+  targetModel: Model<Api>,
+  ctx: Context,
+  options: SimpleStreamOptions | undefined,
+  reasoningOption: Record<string, unknown>,
+  stream: AssistantMessageEventStream,
+  output: AssistantMessage,
+  config: RouterConfig,
+  registry: ModelRegistry,
+  refIdx: number,
+  totalRefs: number,
+  elapsedStart: number,
+  keyPoolAuth: { apiKey: string; headers: Record<string, string> } | null,  // ← BARU
+): Promise<boolean> {
+  // ...
+
+  // OLD:
+  // const auth = await getCachedAuth(targetModel, registry);
+
+  // NEW: pake key pool auth kalo ada, fallback ke registry
+  const auth = keyPoolAuth ?? await getCachedAuth(targetModel, registry);
+
+  // ...
+```
+
+Kalo key pool gak punya provider itu → `keyAuth` = null → `getCachedAuth` dipake = **no breaking change**.
+
+**c. `markFailed` — ALWAYS call (gak digate `isTransientError`):**
+
+```typescript
+// Di catch block tryModel (kalo stream gagal):
+if (keyPoolAuth) {
+  keyPool.markFailed(targetModel.provider, keyPoolAuth.apiKey, err);
+  // markFailed internal handle error classification:
+  //   429/rate-limit → cooldown
+  //   401/403       → dead
+  //   5xx           → cooldown pendek
+  //   lainnya       → cooldown sebentar
 }
 ```
+
+**d. `markSuccess` — panggil pas stream sukses:**
+
+```typescript
+// Di routeStream, pas tryModel berhasil:
+try {
+  const succeeded = await tryModel(...);
+  if (succeeded) {
+    if (keyAuth) {
+      keyPool.markSuccess(targetModel.provider, keyAuth.apiKey);  // ← BARU
+    }
+    return;  // stream sudah ended di dalam tryModel
+  }
+} catch (err) {
+  // error handling...
+}
+```
+
+Kalo `markSuccess` gak dipanggil, health tracking gak pernah reset — failures numpuk terus walau key sebenernya udah pulih.
 
 #### `index.ts` (MODIF)
 - Import key pool
@@ -246,20 +321,25 @@ getNextKey(provider: string): ... {
 ### Error Handling (markFailed)
 
 ```typescript
-markFailed(provider: string, apiKey: string, error: Error): void {
+markFailed(provider: string, apiKey: string, error: unknown): void {
   const pool = this.pools.get(provider)
   if (!pool) return
 
   const health = pool.health.get(apiKey) ?? { status: 'healthy', failures: 0, usageCount: 0 }
   health.failures++
 
+  // Defensive: error mungkin bukan instanceof Error
+  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+
   if (isRateLimitError(error)) {
     // Rate limit → cooldown 5 menit
     health.status = 'cooldown'
     health.until = Date.now() + rateLimitCooldownMs
-  } else if (isAuthError(error)) {
+  } else if (msg.includes('401') || msg.includes('403') || msg.includes('unauthorized') || msg.includes('forbidden') || msg.includes('invalid api key')) {
     // 401/403 → mark dead (gak bakal dipake lagi)
+    // TAPI: simpan timestamp kematian buat recovery
     health.status = 'dead'
+    health.until = Date.now() + 3_600_000  // coba lagi setelah 1 jam
   } else if (isServerError(error)) {
     // 5xx → cooldown pendek (1 menit)
     health.status = 'cooldown'
@@ -274,24 +354,35 @@ markFailed(provider: string, apiKey: string, error: Error): void {
 }
 ```
 
-### Lazy Health Recovery
+### Lazy Health Recovery (includes Dead Recovery)
 
-Key yang cooldown otomatis balik `healthy` pas `until` lewat. Di `getNextKey`, filter cek `until`:
+Key yang cooldown otomatis balik `healthy` pas `until` lewat. Key `dead` juga punya time-based recovery — setelah 1 jam, dicoba lagi.
 
 ```typescript
 const isHealthy = (key: string): boolean => {
   const h = pool.health.get(key)
   if (!h) return true
-  if (h.status === 'dead') return false
+
+  // Cooldown expired → balikin ke healthy
   if (h.status === 'cooldown' && h.until && Date.now() >= h.until) {
-    // Cooldown expired → balikin ke healthy
     h.status = 'healthy'
     h.until = undefined
     return true
   }
+
+  // Dead juga ada expiry — 401/403 bukan selalu permanen
+  // OpenRouter kadang 401 valid key pas upstream rotation
+  if (h.status === 'dead' && h.until && Date.now() >= h.until) {
+    h.status = 'healthy'
+    h.until = undefined
+    return true
+  }
+
   return h.status === 'healthy'
 }
 ```
+
+Kalo user mau revive manual: `/router keys clearcache` reset semua state. Atau nanti bisa ditambah `/router keys revive <provider>` buat per-key.
 
 ---
 
@@ -301,9 +392,30 @@ const isHealthy = (key: string): boolean => {
 
 Sekarang `provider.ts` punya `authCache` — Map of provider/model → apiKey+headers.
 
-Dengan key pool, auth cache ini **bisa di-skip** kalo provider terdaftar di key pool. Tapi kalo provider gak terdaftar, auth cache masih berguna buat pi built-in auth.
+Dengan key pool, auth cache ini perlu di-handle hati-hati.
 
-**Strategy:** Key pool always win. Kalo key pool punya entry buat provider itu, pake dari key pool. Kalo gak ada, fallback ke auth cache / registry.
+**Strategy:**
+1. Key pool always win — kalo provider terdaftar, pake dari key pool.
+2. Kalo key pool return null (semua keys dead/cooldown) → fallback `registry.getApiKeyAndHeaders(targetModel)` **LANGSUNG**, bukan `getCachedAuth`. Ini biar gak dapet stale cached auth yang udah expired.
+3. Kalo provider gak terdaftar di key pool → pake `getCachedAuth` seperti biasa.
+
+```typescript
+// Logic:
+if (keyPool?.hasProvider(targetModel.provider)) {
+  const keyAuth = keyPool.getNextKey(targetModel.provider)
+  if (keyAuth) {
+    // Pake dari key pool
+    auth = keyAuth
+  } else {
+    // Semua keys dead/cooldown → fallback langsung ke registry, SKIP cache
+    const raw = await registry.getApiKeyAndHeaders(targetModel)
+    auth = raw?.ok ? { apiKey: raw.apiKey, headers: raw.headers } : null
+  }
+} else {
+  // Provider gak terdaftar di key pool → pake auth existing
+  auth = await getCachedAuth(targetModel, registry)
+}
+```
 
 ### Cooldown Integration (Existing)
 
@@ -403,7 +515,7 @@ Kalo gak pake router model:
 | Key 1 kena 401 | Mark dead. Skip forever. |
 | Semua keys cooldown | `null` → fallback ke pi auth. Tapi kalo pi auth juga gak bisa, stream error |
 | Provider gak terdaftar di key pool | Fallback ke `registry.getApiKeyAndHeaders()` |
-| Config berubah pas session (reload) | Key pool reload. Active requests pake old pool (no race). |
+| Config berubah pas session (reload) | Key pool reload via atomic replacement (bukan mutate in-place). Active requests pegang reference ke pool lama, request baru dapet pool baru. |
 | Round-robin + concurrent requests | 2 model pake key berbeda di waktu yang sama |
 
 ---
@@ -412,13 +524,30 @@ Kalo gak pake router model:
 
 | Fitur | Alasan |
 |---|---|
-| **Encrypted key storage** | Kompleksitas. File permission cukup untuk sekarang |
+| **Encrypted key storage** | Kompleksitas. File permission `chmod 600` cukup untuk sekarang |
 | **Auto-discovery (scan API buat list models)** | Terlalu berat. Bisa tambah nanti |
 | **Cost tracking per key** | Butuh state persistence + API parsing |
 | **Key expiry monitoring** | API keys biasanya gak expire. Low value. |
 | **Dashboard widget** | Bisa tambah kalo TUI widget diperlukan |
 | **OAuth / SSO support** | Key-based only v1. OAuth beda flow. |
 | **CLI flags** (`--key-pool-file`) | Bisa tambah nanti |
+| **Per-key revive command** | Sementara `dead` punya time-based recovery (1 jam). `/router keys revive <provider>` bisa ditambah nanti kalo dibutuhin |
+
+## Post-Review Changes
+
+Plan ini udah melalui review oleh sub-agent reviewer. Temuan yang di-fix:
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | HIGH | `tryModel()` re-fetches auth independently — key pool auth never reaches API call | Pass `keyAuth` sebagai parameter ke `tryModel()`, ganti `getCachedAuth` di dalamnya |
+| 2 | HIGH | `isTransientError` gate blocks auth errors → keys never marked dead | Hapus gate. Always call `markFailed`. Biar method sendiri yang klasifikasi error |
+| 3 | HIGH | `markSuccess` never called → health never resets | Panggil `keyPool.markSuccess()` pas `tryModel` return true |
+| 4 | HIGH | `.pi/router-keys.json` not gitignored → keys committed to git | Tambah security warning + rekomendasi global scope. Update `.gitignore` |
+| 5 | MEDIUM | Dead keys have no recovery path | Tambah time-based recovery: dead keys coba lagi setelah 1 jam |
+| 6 | MEDIUM | Header merge strategy unspecified | Document: key pool headers **fully replace** pi built-in headers untuk managed provider |
+| 7 | MEDIUM | Stale auth cache when key pool returns null after reload | Fallback langsung ke `registry.getApiKeyAndHeaders()`, bukan `getCachedAuth()` |
+| 8 | LOW | Reload race condition underspecified | Atomic replacement: assign new pool instance, gak mutate existing |
+| 9 | LOW | `markFailed` assumes `Error` instance | Pake defensive pattern `error instanceof Error ? error.message : String(error)` |
 
 ---
 
