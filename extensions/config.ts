@@ -2,7 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
-import type { RouterConfig, CustomModelConfig } from './types'
+import type { RouterConfig, CustomModelConfig, CustomProviderEntry } from './types'
 import { CONFIG_FILENAME } from './constants'
 
 const CONFIG_LEVELS: ThinkingLevel[] = ['xhigh', 'high', 'medium', 'low']
@@ -76,6 +76,10 @@ export const normalizeConfig = (raw: unknown): RouterConfig => {
 
   const result: RouterConfig = { models }
 
+  if (obj.providers !== undefined) {
+    result.providers = normalizeProviders(obj.providers)
+  }
+
   if (obj.rateLimitCooldownMs !== undefined) {
     if (typeof obj.rateLimitCooldownMs !== 'number' || obj.rateLimitCooldownMs < 0) {
       throw new Error('rateLimitCooldownMs must be a non-negative number')
@@ -84,6 +88,80 @@ export const normalizeConfig = (raw: unknown): RouterConfig => {
   }
 
   return result
+}
+
+const normalizeProviders = (
+  raw: unknown,
+): Record<string, CustomProviderEntry> => {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error('Config "providers" must be a non-null object')
+  }
+
+  const providers: Record<string, CustomProviderEntry> = {}
+
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) {
+      throw new Error(`Provider "${name}" must be an object`)
+    }
+
+    const entry = value as Record<string, unknown>
+
+    if (typeof entry.baseUrl !== 'string' || !entry.baseUrl) {
+      throw new Error(`Provider "${name}" must have a non-empty "baseUrl" string`)
+    }
+
+    if (typeof entry.apiKey !== 'string' || !entry.apiKey) {
+      throw new Error(`Provider "${name}" must have a non-empty "apiKey" string`)
+    }
+
+    if (typeof entry.api !== 'string' || !entry.api) {
+      throw new Error(`Provider "${name}" must have a non-empty "api" string`)
+    }
+
+    if (!Array.isArray(entry.models)) {
+      throw new Error(`Provider "${name}" must have a "models" array`)
+    }
+
+    const models: CustomProviderEntry['models'] = []
+    for (const [i, m] of entry.models.entries()) {
+      if (typeof m !== 'object' || m === null) {
+        throw new Error(`Provider "${name}" models[${i}] must be an object`)
+      }
+      const model = m as Record<string, unknown>
+      if (typeof model.id !== 'string' || !model.id) {
+        throw new Error(`Provider "${name}" models[${i}] must have a non-empty "id" string`)
+      }
+      models.push(model as unknown as CustomProviderEntry['models'][number])
+    }
+
+    const provider: CustomProviderEntry = {
+      managed: entry.managed !== false,
+      baseUrl: entry.baseUrl as string,
+      apiKey: entry.apiKey as string,
+      api: entry.api as string,
+      models,
+    }
+
+    if (entry.authHeader !== undefined) {
+      provider.authHeader = Boolean(entry.authHeader)
+    }
+    if (entry.headers !== undefined) {
+      if (typeof entry.headers !== 'object' || entry.headers === null) {
+        throw new Error(`Provider "${name}" "headers" must be an object`)
+      }
+      provider.headers = entry.headers as Record<string, string>
+    }
+    if (entry.compat !== undefined) {
+      if (typeof entry.compat !== 'object' || entry.compat === null) {
+        throw new Error(`Provider "${name}" "compat" must be an object`)
+      }
+      provider.compat = entry.compat as Record<string, unknown>
+    }
+
+    providers[name] = provider
+  }
+
+  return providers
 }
 
 export const getMaxThinkingLevel = (

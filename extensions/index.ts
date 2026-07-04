@@ -16,6 +16,7 @@ export default function routerExtension(api: ExtensionAPI): void {
   let lastModelsFingerprint = ''
   let modelRegistry: any = null
   let keyPool: ModelKeyPool | null = null
+  let registeredCustomProviders: Set<string> = new Set()
   // Track whether the most recent registerRouterProvider call had a null registry.
   // When registry becomes available later (on session_start), we need to re-register
   // to update the streamSimple closure with the real registry.
@@ -44,6 +45,9 @@ export default function routerExtension(api: ExtensionAPI): void {
       }
     }
 
+    // Register custom providers
+    registerCustomProviders(api, keyPool, registeredCustomProviders, config)
+
     const haveRegistryNow = !!modelRegistry
     // Re-register if: config changed, or registry transitions null → available
     const needsReRegister = configChanged || (!lastRegistrationHadRegistry && haveRegistryNow)
@@ -58,7 +62,52 @@ export default function routerExtension(api: ExtensionAPI): void {
     console.error('[router-extension] Eager registration failed:', err),
   )
 
-  /** Update status to show which fallback model is currently active (first non-cooldowned). */
+  /** Register or update custom providers from config into pi registry. */
+function registerCustomProviders(
+  api: ExtensionAPI,
+  keyPool: ModelKeyPool | null,
+  registeredNames: Set<string>,
+  config: RouterConfig,
+): void {
+  const configProviderNames = new Set(Object.keys(config.providers ?? {}))
+
+  // Unregister providers that were removed from config
+  for (const name of registeredNames) {
+    if (!configProviderNames.has(name)) {
+      try {
+        ;(api as any).unregisterProvider?.(name)
+      } catch {
+        // ignore
+      }
+      registeredNames.delete(name)
+    }
+  }
+
+  // Register new/changed providers
+  for (const [name, provider] of Object.entries(config.providers ?? {})) {
+    if (!provider.managed) continue
+
+    const registerConfig: Record<string, unknown> = {
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      api: provider.api,
+      models: provider.models,
+    }
+
+    if (provider.authHeader) registerConfig.authHeader = provider.authHeader
+    if (provider.headers && Object.keys(provider.headers).length > 0) {
+      registerConfig.headers = provider.headers
+    }
+    if (provider.compat && Object.keys(provider.compat).length > 0) {
+      registerConfig.compat = provider.compat
+    }
+
+    ;(api as any).registerProvider(name, registerConfig)
+    registeredNames.add(name)
+  }
+}
+
+/** Update status to show which fallback model is currently active (first non-cooldowned). */
   function updateRouterChainStatus(ctx: ExtensionContext): void {
     const model = ctx.model
     if (model?.provider === PROVIDER_NAME) {

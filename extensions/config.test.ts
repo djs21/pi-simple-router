@@ -108,6 +108,216 @@ describe('normalizeConfig', () => {
 })
 
 // ---------------------------------------------------------------------------
+// normalizeConfig — providers field
+// ---------------------------------------------------------------------------
+describe('normalizeConfig with providers', () => {
+  it('parses providers field with basic entry', () => {
+    const result = normalizeConfig({
+      models: {},
+      providers: {
+        'my-vllm': {
+          baseUrl: 'http://localhost:11434/v1',
+          apiKey: 'ollama',
+          api: 'openai-completions',
+          models: [{ id: 'qwen2.5-coder:7b' }],
+        },
+      },
+    })
+    expect(result.providers).toBeDefined()
+    expect(result.providers!['my-vllm']).toBeDefined()
+    expect(result.providers!['my-vllm'].baseUrl).toBe('http://localhost:11434/v1')
+    expect(result.providers!['my-vllm'].apiKey).toBe('ollama')
+    expect(result.providers!['my-vllm'].api).toBe('openai-completions')
+    expect(result.providers!['my-vllm'].models).toHaveLength(1)
+    expect(result.providers!['my-vllm'].models[0].id).toBe('qwen2.5-coder:7b')
+  })
+
+  it('defaults managed to true when not set', () => {
+    const result = normalizeConfig({
+      models: {},
+      providers: {
+        myp: {
+          baseUrl: 'http://localhost:11434/v1',
+          apiKey: 'k',
+          api: 'openai-completions',
+          models: [{ id: 'm' }],
+        },
+      },
+    })
+    expect(result.providers!['myp'].managed).toBe(true)
+  })
+
+  it('respects managed: false', () => {
+    const result = normalizeConfig({
+      models: {},
+      providers: {
+        myp: {
+          managed: false,
+          baseUrl: 'http://localhost:11434/v1',
+          apiKey: 'k',
+          api: 'openai-completions',
+          models: [{ id: 'm' }],
+        },
+      },
+    })
+    expect(result.providers!['myp'].managed).toBe(false)
+  })
+
+  it('parses optional authHeader, headers, compat', () => {
+    const result = normalizeConfig({
+      models: {},
+      providers: {
+        proxy: {
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: '$PROXY_KEY',
+          api: 'anthropic-messages',
+          authHeader: true,
+          headers: { 'x-custom': 'val' },
+          compat: { supportsDeveloperRole: false },
+          models: [{ id: 'claude-sonnet-4', reasoning: true, input: ['text', 'image'] }],
+        },
+      },
+    })
+    const p = result.providers!['proxy']
+    expect(p.authHeader).toBe(true)
+    expect(p.headers).toEqual({ 'x-custom': 'val' })
+    expect(p.compat).toEqual({ supportsDeveloperRole: false })
+    expect(p.models[0].reasoning).toBe(true)
+    expect(p.models[0].input).toEqual(['text', 'image'])
+  })
+
+  it('accepts empty providers object', () => {
+    const result = normalizeConfig({ models: {}, providers: {} })
+    expect(result.providers).toEqual({})
+  })
+
+  it('throws when providers is not an object', () => {
+    expect(() => normalizeConfig({ models: {}, providers: 'string' })).toThrow(
+      'Config "providers" must be a non-null object',
+    )
+  })
+
+  it('throws when provider entry is not an object', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: { myp: 'string' },
+      }),
+    ).toThrow('Provider "myp" must be an object')
+  })
+
+  it('throws when provider has no baseUrl', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: { apiKey: 'k', api: 'o', models: [{ id: 'm' }] },
+        },
+      }),
+    ).toThrow('Provider "myp" must have a non-empty "baseUrl" string')
+  })
+
+  it('throws when provider has no apiKey', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: { baseUrl: 'http://localhost:11434/v1', api: 'o', models: [{ id: 'm' }] },
+        },
+      }),
+    ).toThrow('Provider "myp" must have a non-empty "apiKey" string')
+  })
+
+  it('throws when provider has no api', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: { baseUrl: 'http://localhost:11434/v1', apiKey: 'k', models: [{ id: 'm' }] },
+        },
+      }),
+    ).toThrow('Provider "myp" must have a non-empty "api" string')
+  })
+
+  it('throws when provider has no models array', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: { baseUrl: 'http://localhost:11434/v1', apiKey: 'k', api: 'openai-completions' },
+        },
+      }),
+    ).toThrow('Provider "myp" must have a "models" array')
+  })
+
+  it('throws when model entry has no id', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: {
+            baseUrl: 'http://localhost:11434/v1',
+            apiKey: 'k',
+            api: 'openai-completions',
+            models: [{ name: 'no-id' }],
+          },
+        },
+      }),
+    ).toThrow('Provider "myp" models[0] must have a non-empty "id" string')
+  })
+
+  it('throws when headers is not an object', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: {
+            baseUrl: 'http://localhost:11434/v1',
+            apiKey: 'k',
+            api: 'openai-completions',
+            headers: 'not-object',
+            models: [{ id: 'm' }],
+          },
+        },
+      }),
+    ).toThrow('Provider "myp" "headers" must be an object')
+  })
+
+  it('throws when compat is not an object', () => {
+    expect(() =>
+      normalizeConfig({
+        models: {},
+        providers: {
+          myp: {
+            baseUrl: 'http://localhost:11434/v1',
+            apiKey: 'k',
+            api: 'openai-completions',
+            compat: 'string',
+            models: [{ id: 'm' }],
+          },
+        },
+      }),
+    ).toThrow('Provider "myp" "compat" must be an object')
+  })
+
+  it('coexists with existing models config', () => {
+    const result = normalizeConfig({
+      models: { thinker: { models: ['openai/gpt-4'] } },
+      providers: {
+        local: {
+          baseUrl: 'http://localhost:11434/v1',
+          apiKey: 'k',
+          api: 'openai-completions',
+          models: [{ id: 'llama3.1:8b' }],
+        },
+      },
+    })
+    expect(result.models.thinker).toBeDefined()
+    expect(result.providers!['local']).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // getMaxThinkingLevel
 // ---------------------------------------------------------------------------
 describe('getMaxThinkingLevel', () => {
