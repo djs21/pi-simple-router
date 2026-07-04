@@ -1,14 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent'
 import type { AutocompleteItem } from '@earendil-works/pi-tui'
 import { showModelSelector, buildModelOptions } from './model-selector.js'
-import type { RouterConfig, CustomModelConfig, SaveScope } from './types.js'
+import type { RouterConfig, CustomModelConfig, SaveScope, KeyPoolConfig } from './types.js'
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME, PROVIDER_NAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
 import { getActiveRateLimits, clearRateLimits, isRateLimited } from './rate-limit-tracker.js'
+import { ModelKeyPool } from './key-pool.js'
+import { handleKeysCommand } from './keys-commands.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -30,6 +32,7 @@ const SUBCOMMANDS: Array<{
   { name: 'status', description: 'Lihat config aktif + cooldown' },
   { name: 'reload', description: 'Reload config dari file' },
   { name: 'clearcache', description: 'Reset cooldown cache' },
+  { name: 'keys', description: 'Manajemen API keys' },
   { name: 'help', description: 'Bantuan' },
 ]
 
@@ -410,6 +413,7 @@ export function registerCommands(
   getMerged: () => RouterConfig,
   reloadConfig: () => Promise<void>,
   getModelRegistry: () => any,
+  keyPool?: ModelKeyPool | null,
 ): void {
   api.registerCommand('router', {
     description: 'Custom model router commands (interactive)',
@@ -464,6 +468,49 @@ export function registerCommands(
       if (subcmd === 'clearcache') {
         clearRateLimits()
         ctx.ui.notify('🧹 Cooldown cache cleared', 'info')
+        return
+      }
+
+      if (subcmd === 'keys') {
+        // Parse remaining args after 'keys'
+        const restArgs = parts.slice(1).join(' ')
+
+        // Keys config loader — reads current keys config from files
+        const keysConfigLoader = (): KeyPoolConfig => {
+          const globalPath = join(homedir(), '.pi', 'agent', 'router-keys.json')
+          const projectPath = join(process.cwd(), '.pi', 'router-keys.json')
+
+          const readIfExists = (filePath: string): KeyPoolConfig | null => {
+            try {
+              if (!existsSync(filePath)) return null
+              const raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+              // Basic normalization inline
+              if (typeof raw !== 'object' || raw === null) return null
+              const obj = raw as Record<string, unknown>
+              if (typeof obj.providers !== 'object' || obj.providers === null) return null
+              return raw as KeyPoolConfig
+            } catch {
+              return null
+            }
+          }
+
+          const globalCfg = readIfExists(globalPath) ?? { providers: {} }
+          const projectCfg = readIfExists(projectPath) ?? { providers: {} }
+          return {
+            providers: { ...globalCfg.providers, ...projectCfg.providers },
+          }
+        }
+
+        // Keys config writer — writes to project scope
+        const keysConfigWriter = (config: KeyPoolConfig): void => {
+          const projectPath = join(process.cwd(), '.pi', 'router-keys.json')
+          mkdirSync(dirname(projectPath), { recursive: true })
+          writeFileSync(projectPath, JSON.stringify(config, null, 2) + '\n')
+        }
+
+        // If no keyPool is available, create a fallback one (shouldn't happen normally)
+        const pool = keyPool ?? new ModelKeyPool({ providers: {} })
+        await handleKeysCommand(restArgs, ctx, pool, keysConfigLoader, keysConfigWriter)
         return
       }
 
