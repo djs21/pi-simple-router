@@ -11,6 +11,8 @@ interface KeyEntry {
   failures: number
   /** Timestamp (ms) when this key recovers. 0 = not in cooldown/dead. */
   until: number
+  usageCount: number
+  lastUsed: number | null
 }
 
 interface ProviderPool {
@@ -25,6 +27,7 @@ interface ProviderPool {
 
 const DEFAULT_KEY_COOLDOWN_MS = 60_000
 const DEFAULT_KEY_DEAD_MS = 300_000
+const ERROR_RATE_THRESHOLD = 5
 
 /** Classify an error to determine key health and recovery duration. */
 function classifyError(
@@ -83,6 +86,8 @@ export class ModelKeyPool {
         status: 'healthy' as KeyHealth,
         failures: 0,
         until: 0,
+        usageCount: 0,
+        lastUsed: null,
       }))
       this.pools.set(provider, {
         strategy: entry.strategy ?? 'round-robin',
@@ -99,13 +104,48 @@ export class ModelKeyPool {
     if (!pool) return null
     if (pool.keys.length === 0) return null
 
-    for (const key of pool.keys) {
+    if (pool.strategy === 'fallback') {
+      return this.fallbackNext(pool)
+    }
+    return this.roundRobinNext(pool)
+  }
+
+  private roundRobinNext(
+    pool: ProviderPool,
+  ): { apiKey: string; headers: Record<string, string> } | null {
+    const healthy = this.healthyKeys(pool)
+    if (healthy.length === 0) return null
+
+    for (let i = 0; i < pool.keys.length; i++) {
+      const idx = (pool.currentIndex + i) % pool.keys.length
+      const key = pool.keys[idx]
       if (this.isHealthy(key)) {
+        pool.currentIndex = (idx + 1) % pool.keys.length
+        key.usageCount++
+        key.lastUsed = Date.now()
         return { apiKey: key.apiKey, headers: { ...key.headers } }
       }
     }
 
     return null
+  }
+
+  private fallbackNext(
+    pool: ProviderPool,
+  ): { apiKey: string; headers: Record<string, string> } | null {
+    for (const key of pool.keys) {
+      if (this.isHealthy(key)) {
+        key.usageCount++
+        key.lastUsed = Date.now()
+        return { apiKey: key.apiKey, headers: { ...key.headers } }
+      }
+    }
+
+    return null
+  }
+
+  private healthyKeys(pool: ProviderPool): KeyEntry[] {
+    return pool.keys.filter((k) => this.isHealthy(k))
   }
 
   markFailed(
@@ -120,9 +160,15 @@ export class ModelKeyPool {
     if (!key) return
 
     const { status, durationMs } = classifyError(err)
-    key.status = status
     key.failures++
-    key.until = Date.now() + durationMs
+
+    if (key.failures >= ERROR_RATE_THRESHOLD) {
+      key.status = 'dead'
+      key.until = Date.now() + DEFAULT_KEY_DEAD_MS
+    } else {
+      key.status = status
+      key.until = Date.now() + durationMs
+    }
   }
 
   markSuccess(provider: string, apiKey: string): void {
@@ -141,23 +187,35 @@ export class ModelKeyPool {
     provider: string
     keys: string[]
     health: Record<string, KeyHealth>
+    failures: Record<string, number>
+    usageCount: Record<string, number>
+    lastUsed: Record<string, number | null>
     strategy: RotationStrategy
   }> {
     const result: Array<{
       provider: string
       keys: string[]
       health: Record<string, KeyHealth>
+      failures: Record<string, number>
+      usageCount: Record<string, number>
+      lastUsed: Record<string, number | null>
       strategy: RotationStrategy
     }> = []
 
     for (const [provider, pool] of this.pools) {
       const health: Record<string, KeyHealth> = {}
+      const failures: Record<string, number> = {}
+      const usageCount: Record<string, number> = {}
+      const lastUsed: Record<string, number | null> = {}
       const keys: string[] = []
       for (const key of pool.keys) {
         keys.push(key.apiKey)
         health[key.apiKey] = key.status
+        failures[key.apiKey] = key.failures
+        usageCount[key.apiKey] = key.usageCount
+        lastUsed[key.apiKey] = key.lastUsed
       }
-      result.push({ provider, keys, health, strategy: pool.strategy })
+      result.push({ provider, keys, health, failures, usageCount, lastUsed, strategy: pool.strategy })
     }
 
     return result.sort((a, b) => a.provider.localeCompare(b.provider))
@@ -172,6 +230,8 @@ export class ModelKeyPool {
         status: 'healthy' as KeyHealth,
         failures: 0,
         until: 0,
+        usageCount: 0,
+        lastUsed: null,
       }))
       this.pools.set(provider, {
         strategy: entry.strategy ?? 'round-robin',
@@ -187,6 +247,8 @@ export class ModelKeyPool {
         key.status = 'healthy'
         key.failures = 0
         key.until = 0
+        key.usageCount = 0
+        key.lastUsed = null
       }
     }
   }
