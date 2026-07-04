@@ -15,6 +15,31 @@ import type { ModelKeyPool } from './key-pool'
 import type { KeyPoolConfig, KeyHealth } from './types'
 
 // ---------------------------------------------------------------------------
+// Key validation (test command)
+// ---------------------------------------------------------------------------
+
+/**
+ * Test a single API key by making a lightweight API call.
+ */
+export async function testKey(
+  _provider: string,
+  apiKey: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    // Minimal API test — GET /models to validate the key
+    const response = await fetch(`https://api.openai.com/v1/models`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (response.ok) return { ok: true }
+    const text = await response.text().catch(() => '')
+    return { ok: false, error: `${response.status} ${text || response.statusText}` }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -24,6 +49,7 @@ const KEYS_SUBCOMMANDS = [
   { name: 'add', description: 'Tambah API key baru (interaktif)' },
   { name: 'remove', description: 'Hapus API key (interaktif)' },
   { name: 'clearcache', description: 'Reset semua state key (cooldown/dead)' },
+  { name: 'test', description: 'Test validasi semua API key untuk provider tertentu' },
   { name: 'help', description: 'Tampilkan bantuan' },
 ]
 
@@ -262,6 +288,39 @@ function cmdHelp(ctx: ExtensionCommandContext): void {
 }
 
 // ---------------------------------------------------------------------------
+// Test
+// ---------------------------------------------------------------------------
+
+async function cmdTest(
+  ctx: ExtensionCommandContext,
+  keyPool: ModelKeyPool,
+  provider: string,
+): Promise<void> {
+  const pools = keyPool.getStatus()
+  const pool = pools.find((s) => s.provider === provider)
+  if (!pool || pool.keys.length === 0) {
+    ctx.ui.notify(`⚠️ No keys found for provider "${provider}"`, 'warning')
+    return
+  }
+
+  const lines: string[] = [`Testing keys for ${provider}:`]
+  for (const key of pool.keys) {
+    const result = await testKey(provider, key)
+    if (result.ok) {
+      keyPool.markSuccess(provider, key)
+      lines.push(`  ✓ ${truncateKey(key)}`)
+    } else {
+      // Defensively handle non-Error objects
+      const errMsg = result.error ?? 'Unknown error'
+      keyPool.markFailed(provider, key, errMsg)
+      lines.push(`  ✗ ${truncateKey(key)}: ${result.error}`)
+    }
+  }
+
+  ctx.ui.notify(lines.join('\n'), 'info')
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
@@ -302,6 +361,9 @@ export async function handleKeysCommand(
       break
     case 'remove':
       await cmdRemove(ctx, keyPool, keysConfigLoader, writer, rest[0])
+      break
+    case 'test':
+      await cmdTest(ctx, keyPool, rest.join(' '))
       break
     case 'help':
     default:

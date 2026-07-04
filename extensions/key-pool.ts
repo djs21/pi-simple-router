@@ -31,9 +31,9 @@ const ERROR_RATE_THRESHOLD = 5
 
 /** Classify an error to determine key health and recovery duration. */
 function classifyError(
-  err: Error,
+  errMessage: string,
 ): { status: Exclude<KeyHealth, 'healthy'>; durationMs: number } {
-  const msg = err.message.toLowerCase()
+  const msg = errMessage.toLowerCase()
 
   // Rate-limit errors (429, etc.) → cooldown
   if (
@@ -151,7 +151,7 @@ export class ModelKeyPool {
   markFailed(
     provider: string,
     apiKey: string,
-    err: Error,
+    err: unknown,
   ): void {
     const pool = this.pools.get(provider)
     if (!pool) return
@@ -159,7 +159,8 @@ export class ModelKeyPool {
     const key = pool.keys.find((k) => k.apiKey === apiKey)
     if (!key) return
 
-    const { status, durationMs } = classifyError(err)
+    const msg = err instanceof Error ? err.message : String(err)
+    const { status, durationMs } = classifyError(msg)
     key.failures++
 
     if (key.failures >= ERROR_RATE_THRESHOLD) {
@@ -222,7 +223,7 @@ export class ModelKeyPool {
   }
 
   reload(config: KeyPoolConfig): void {
-    this.pools.clear()
+    const newPools = new Map<string, ProviderPool>()
     for (const [provider, entry] of Object.entries(config.providers)) {
       const keys: KeyEntry[] = entry.keys.map((k) => ({
         apiKey: k,
@@ -233,12 +234,13 @@ export class ModelKeyPool {
         usageCount: 0,
         lastUsed: null,
       }))
-      this.pools.set(provider, {
+      newPools.set(provider, {
         strategy: entry.strategy ?? 'round-robin',
         keys,
         currentIndex: 0,
       })
     }
+    this.pools = newPools
   }
 
   clear(): void {
