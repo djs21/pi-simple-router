@@ -4,6 +4,7 @@ import { loadRouterConfig } from './config.js'
 import { registerRouterProvider } from './provider.js'
 import { registerCommands } from './commands.js'
 import { setStatusLine } from './ui.js'
+import { formatFooterStatus } from './keys-commands.js'
 import { PROVIDER_NAME } from './constants.js'
 import { isRateLimited } from './rate-limit-tracker.js'
 import { loadKeysConfig } from './keys-config.js'
@@ -86,22 +87,35 @@ export default function routerExtension(api: ExtensionAPI): void {
     await loadAndRegister()
     setStatusLine(ctx, `🔀 Router: ${Object.keys(currentConfig.models).length} models`)
     updateRouterChainStatus(ctx)
+    updateKeyPoolStatus(ctx)
   })
 
   api.on('model_select', (_event: unknown, ctx: ExtensionContext) => {
     updateRouterChainStatus(ctx)
+    updateKeyPoolStatus(ctx)
   })
 
   api.on('turn_start', (_event: unknown, ctx: ExtensionContext) => {
     updateRouterChainStatus(ctx)
+    updateKeyPoolStatus(ctx)
   })
 
   api.on('session_shutdown', () => {
     // nothing to clean up
   })
 
+  /** Update key pool footer status. */
+  function updateKeyPoolStatus(ctx: ExtensionContext): void {
+    const model = ctx.model
+    if (model?.provider === PROVIDER_NAME) {
+      ctx.ui.setStatus('router-keys', formatFooterStatus(keyPool))
+    } else {
+      ctx.ui.setStatus('router-keys', undefined)
+    }
+  }
+
   // --- Register commands ---
-  registerCommands(api, () => currentConfig, loadAndRegister, () => modelRegistry)
+  registerCommands(api, () => currentConfig, loadAndRegister, () => modelRegistry, keyPool)
 
   console.log('[router-extension] Loaded. Config models:', Object.keys(currentConfig.models).length)
 }
