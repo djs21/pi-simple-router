@@ -8,3 +8,6 @@ dist/
 .dolt/
 *.db
 .beads-credential-key
+
+# Generated lockfile
+package-lock.json

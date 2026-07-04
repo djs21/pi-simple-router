@@ -120,12 +120,12 @@ Single-context layout:
 | Path | Scope |
 |---|---|
 | `docs/` | Project documentation, plans, ADRs, PRDs. See `docs/plan.md` for implementation plan and `docs/prd-error-state-invisibility.md` for the error invisibility PRD. |
-| `extensions/` | Extension source code + tests (10 modules, ~1000 lines). Custom model router pi extension with fallback chain. Vitest unit tests in `*.test.ts`. See `docs/plan.md` for full spec. |
+| `extensions/` | Extension source code + tests (15 modules, ~3500 lines). Custom model router pi extension with fallback chain, centralized key pool manager with rotation/health tracking, key management commands. Vitest unit tests in `*.test.ts`. New files: `key-pool.ts`, `keys-config.ts`, `keys-commands.ts`. See `docs/plans/key-pool-manager.md` for key pool spec. |
 | `README.md` | Project overview, instalasi, konfigurasi, usage, commands, features, development guide, dan lisensi dalam Bahasa Indonesia. |
 | `package.json` | Root project manifest: pi extension registration, scripts (`npm test` → vitest, `npm run typecheck` → tsc), devDependencies. |
 | `tsconfig.json` | TypeScript configuration: strict, ESNext, bundler resolution. |
 | `model-router.example.json` | Example user configuration for the model router extension. |
-| `.gitignore` | Project-wide ignores: node_modules/, dist/, .pi/plans/, *.log. |
+| `.gitignore` | Project-wide ignores: node_modules/, dist/, .pi/plans/, .worktrees/, *.log. |
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
