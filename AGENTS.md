@@ -120,7 +120,7 @@ Single-context layout:
 | Path | Scope |
 |---|---|
 | `docs/` | Project documentation, plans, ADRs, PRDs. See `docs/plan.md` for implementation plan, `docs/prd-error-state-invisibility.md` for error invisibility PRD, `docs/prd-key-pool-manager.md` for key pool PRD, and `docs/plans/key-pool-manager.md` for key pool implementation plan. Handoff docs in `docs/handoff/`. |
-| `extensions/` | Extension source code + tests (17 modules, ~5300 lines). Custom model router pi extension with fallback chain, centralized key pool manager with rotation/health tracking, key management commands. Vitest unit tests in `*.test.ts`. Includes `key-pool.ts`, `keys-config.ts`, `keys-commands.ts` for centralized key management. See `docs/plans/key-pool-manager.md` for key pool spec. |
+| `extensions/` | Extension source code + tests (17 modules, ~5700 lines). Custom model router pi extension with fallback chain, centralized key pool manager with rotation/health tracking, key management commands, and custom provider registration (Ollama, vLLM, proxies via `providers` field in config). Vitest unit tests in `*.test.ts`. Includes `key-pool.ts`, `keys-config.ts`, `keys-commands.ts` for centralized key management. Custom provider types in `types.ts`. See `docs/plans/key-pool-manager.md` for key pool spec. |
 | `README.md` | Project overview, instalasi, konfigurasi, usage, commands, features, development guide, dan lisensi dalam Bahasa Indonesia. |
 | `package.json` | Root project manifest: pi extension registration, scripts (`npm test` → vitest, `npm run typecheck` → tsc), devDependencies. |
 | `tsconfig.json` | TypeScript configuration: strict, ESNext, bundler resolution. |
