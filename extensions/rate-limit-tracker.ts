@@ -36,7 +36,7 @@ function getDbPath(): string {
 /**
  * Return the module-level SQLite connection, creating it lazily.
  */
-function getDb(): DatabaseSync {
+export function getDb(): DatabaseSync {
   if (_db) return _db
   _db = new DatabaseSync(getDbPath())
   _db.exec('PRAGMA journal_mode=WAL')
@@ -48,6 +48,22 @@ function getDb(): DatabaseSync {
     duration_ms   INTEGER NOT NULL,
     consecutive   INTEGER DEFAULT 1 CHECK(consecutive >= 1)
   )`)
+  _db.exec(`CREATE TABLE IF NOT EXISTS usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    router_ref    TEXT NOT NULL,
+    model_ref     TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read    INTEGER NOT NULL DEFAULT 0,
+    cache_write   INTEGER NOT NULL DEFAULT 0,
+    total_tokens  INTEGER NOT NULL DEFAULT 0,
+    cost_input    REAL NOT NULL DEFAULT 0,
+    cost_output   REAL NOT NULL DEFAULT 0,
+    cost_total    REAL NOT NULL DEFAULT 0,
+    timestamp     INTEGER NOT NULL
+  )`)
+  _db.exec('CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp)')
+  _db.exec('CREATE INDEX IF NOT EXISTS idx_usage_router_ref ON usage(router_ref)')
   return _db
 }
 
