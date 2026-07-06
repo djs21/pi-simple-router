@@ -28,6 +28,7 @@ const SUBCOMMANDS: Array<{
   description: string
 }> = [
   { name: 'status', description: 'Lihat config aktif + cooldown' },
+  { name: 'cd', description: 'Lihat cooldown aktif + eskalasi (alias: cooldown)' },
   { name: 'reload', description: 'Reload config dari file' },
   { name: 'clearcache', description: 'Reset cooldown cache' },
   { name: 'help', description: 'Bantuan' },
@@ -463,6 +464,28 @@ export function registerCommands(
           }
         }
         ctx.ui.notify('🔄 Router config reloaded', 'info')
+        return
+      }
+
+      if (subcmd === 'cd' || subcmd === 'cooldown') {
+        const lines = ['⏳ Cooldowns:']
+        const limits = getActiveRateLimits()
+        if (limits.length === 0) {
+          lines.push('  (none)')
+        } else {
+          for (const { ref, remainingMs, errorType, consecutive } of limits) {
+            const mins = Math.floor(remainingMs / 60_000)
+            const secs = Math.ceil((remainingMs % 60_000) / 1000)
+            const remaining = mins >= 1 ? `${mins}m ${secs}s` : `${secs}s`
+
+            let tierLabel = '→ 5m tier'
+            if (consecutive >= 7) tierLabel = '→ 6h tier'
+            else if (consecutive >= 5) tierLabel = '→ 1h tier'
+
+            lines.push(`  ${ref} — ${remaining} (${errorType}, consecutive: ${consecutive} ${tierLabel})`)
+          }
+        }
+        ctx.ui.notify(lines.join('\n'), 'info')
         return
       }
 
