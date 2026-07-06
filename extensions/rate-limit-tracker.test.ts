@@ -5,7 +5,7 @@
  * in `beforeEach` and cleans up in `afterEach`, ensuring full isolation.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import {
   _setDbForTesting,
@@ -16,7 +16,8 @@ import {
   getRemainingCooldownMs,
   classifyError,
   isRateLimitError,
-  isTransientError,
+  resetCooldown,
+  computeCooldownMs,
 } from './rate-limit-tracker'
 
 describe('rate-limit-tracker (SQLite)', () => {
@@ -163,11 +164,70 @@ describe('rate-limit-tracker (SQLite)', () => {
     expect(isRateLimitError(new Error('Model not found'))).toBe(false)
   })
 
-  it('isTransientError matches 502', () => {
-    expect(isTransientError('502 Bad Gateway')).toBe(true)
+  // -----------------------------------------------------------------------
+  // Escalation — consecutive counting, tiers, reset
+  // -----------------------------------------------------------------------
+
+  it('same error type 5x escalates cooldown to 1h tier', () => {
+    for (let i = 0; i < 5; i++) {
+      markRateLimited('test/model', 300_000, 'rate_limit')
+    }
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].consecutive).toBe(5)
+    // 1h = 3,600,000 — remaining should be close to that
+    expect(limits[0].remainingMs).toBeGreaterThan(3_500_000)
   })
 
-  it('isTransientError does not match permanent errors', () => {
-    expect(isTransientError('Model not found')).toBe(false)
+  it('different error types reset consecutive to 1', () => {
+    markRateLimited('test/model', 300_000, 'auth')
+    markRateLimited('test/model', 300_000, 'rate_limit')  // different type → resets to 1
+    expect(getActiveRateLimits()[0].consecutive).toBe(1)
+
+    markRateLimited('test/model', 300_000, 'rate_limit')  // same type → increments to 2
+    expect(getActiveRateLimits()[0].consecutive).toBe(2)
+  })
+
+  it('resetCooldown clears entry, next mark starts at consecutive=1', () => {
+    markRateLimited('test/model', 300_000, 'rate_limit')
+    markRateLimited('test/model', 300_000, 'rate_limit')
+    expect(getActiveRateLimits()[0].consecutive).toBe(2)
+
+    resetCooldown('test/model')
+    expect(getActiveRateLimits().length).toBe(0)
+
+    markRateLimited('test/model', 300_000, 'rate_limit')
+    expect(getActiveRateLimits()[0].consecutive).toBe(1)
+  })
+
+  it('consecutive caps at 12', () => {
+    for (let i = 0; i < 15; i++) {
+      markRateLimited('test/model', 300_000, 'rate_limit')
+    }
+    const limits = getActiveRateLimits()
+    expect(limits[0].consecutive).toBe(12)
+  })
+
+  it('expired entry with same error type increments consecutive', () => {
+    vi.useFakeTimers()
+    markRateLimited('test/model', 1000, 'rate_limit') // consecutive=1
+    vi.advanceTimersByTime(2000) // past expiry
+
+    // Same error type, existing entry has consecutive=1 (even though expired)
+    markRateLimited('test/model', 300_000, 'rate_limit')
+    const limits = getActiveRateLimits()
+    expect(limits[0].consecutive).toBe(2)
+
+    vi.useRealTimers()
+  })
+
+  it('computeCooldownMs returns correct tier values', () => {
+    expect(computeCooldownMs(1)).toBe(300_000)
+    expect(computeCooldownMs(4)).toBe(300_000)
+    expect(computeCooldownMs(5)).toBe(3_600_000)
+    expect(computeCooldownMs(6)).toBe(3_600_000)
+    expect(computeCooldownMs(7)).toBe(21_600_000)
+    expect(computeCooldownMs(12)).toBe(21_600_000)
+    expect(computeCooldownMs(20)).toBe(21_600_000) // capped at 12
   })
 })
