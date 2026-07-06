@@ -432,12 +432,17 @@ export function registerCommands(
         const limits = getActiveRateLimits()
         if (limits.length > 0) {
           lines.push('')
-          lines.push('⏳ Rate Limit Cooldown:')
-          for (const { ref, remainingMs } of limits) {
-            const mins = Math.ceil(remainingMs / 60_000)
+          lines.push('⏳ Cooldowns (with escalation):')
+          for (const { ref, remainingMs, errorType, consecutive } of limits) {
+            const mins = Math.floor(remainingMs / 60_000)
             const secs = Math.ceil((remainingMs % 60_000) / 1000)
-            const remaining = mins >= 1 ? `${mins}m` : `${secs}d`
-            lines.push(`  ${ref} — cooldown ${remaining} lagi`)
+            const remaining = mins >= 1 ? `${mins}m ${secs}s` : `${secs}s`
+
+            let tierLabel = '→ 5m tier'
+            if (consecutive >= 7) tierLabel = '→ 6h tier'
+            else if (consecutive >= 5) tierLabel = '→ 1h tier'
+
+            lines.push(`  ${ref} — ${remaining} (${errorType}, consecutive: ${consecutive} ${tierLabel})`)
           }
         }
 
