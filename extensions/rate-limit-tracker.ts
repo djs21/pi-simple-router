@@ -10,7 +10,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { DEFAULT_RATE_LIMIT_COOLDOWN_MS } from './constants'
+import {
+  DEFAULT_RATE_LIMIT_COOLDOWN_MS,
+  ESCALATION_TIER_2_MIN,
+  ESCALATION_TIER_3_MIN,
+  ESCALATION_COOLDOWN_TIER_1_MS,
+  ESCALATION_COOLDOWN_TIER_2_MS,
+  ESCALATION_COOLDOWN_TIER_3_MS,
+} from './constants'
 
 // ---------------------------------------------------------------------------
 // SQLite connection (lazy, module-level singleton)
@@ -84,43 +91,7 @@ export function isRateLimitError(error: unknown): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => msg.includes(p))
 }
 
-/** Patterns for transient server-side errors worth a cooldown. */
-const TRANSIENT_PATTERNS = [
-  ...RATE_LIMIT_PATTERNS,
-  // Server errors
-  '502', '503', '504',
-  'service unavailable',
-  'internal server error',
-  'gateway timeout',
-  'bad gateway',
-  'upstream',
-  'origin error',
-  // Timeout / connection
-  'timeout',
-  'timed out',
-  'econnrefused',
-  'econnreset',
-  'network error',
-  'socket hang up',
-  'overloaded',
-  'temporarily',
-  'backend',
-  // Provider-level
-  'provider returned error',
-]
 
-/**
- * Check whether an error is a transient server-side error.
- *
- * Transient errors (rate limits, 5xx, timeouts) get cooldown so the
- * model is skipped on subsequent turns. Permanent errors (model not
- * found, auth failure, invalid ref) do NOT get cooldown — they should
- * fail fast every time.
- */
-export function isTransientError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
-  return TRANSIENT_PATTERNS.some((p) => msg.includes(p))
-}
 
 // ---------------------------------------------------------------------------
 // classifyError — new export for Slice 2, added now but not used yet
@@ -205,6 +176,27 @@ export function classifyError(error: string | unknown): 'rate_limit' | 'server_e
 }
 
 // ---------------------------------------------------------------------------
+// computeCooldownMs — escalation tier calculation
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute cooldown duration based on consecutive same-type error count.
+ *
+ * Tiers:
+ *   1–4  → 5 minutes (ESCALATION_COOLDOWN_TIER_1_MS)
+ *   5–6  → 1 hour   (ESCALATION_COOLDOWN_TIER_2_MS)
+ *   7+   → 6 hours  (ESCALATION_COOLDOWN_TIER_3_MS)
+ *
+ * Consecutive is capped at 12 to prevent unbounded growth.
+ */
+export function computeCooldownMs(consecutive: number): number {
+  const capped = Math.min(consecutive, 12)
+  if (capped >= ESCALATION_TIER_3_MIN) return ESCALATION_COOLDOWN_TIER_3_MS   // 6h
+  if (capped >= ESCALATION_TIER_2_MIN) return ESCALATION_COOLDOWN_TIER_2_MS   // 1h
+  return ESCALATION_COOLDOWN_TIER_1_MS                                          // 5m
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -226,25 +218,68 @@ export function isRateLimited(ref: string): boolean {
 /**
  * Mark a model ref as rate-limited with a cooldown period.
  *
+ * If the same model ref already has an active entry with the same error type,
+ * the consecutive counter is incremented and an escalated cooldown is applied.
+ * A different error type resets the counter to 1.
+ *
  * @param ref        Canonical model ref (`"provider/model-id"`)
- * @param cooldownMs Cooldown duration in ms (default: 5 minutes)
+ * @param cooldownMs Base cooldown duration in ms (default: 5 minutes). Used
+ *                   when the counter is reset (new or different error type).
+ * @param errorType  Error category for escalation tracking (default: `'other'`).
  */
-export function markRateLimited(ref: string, cooldownMs: number = DEFAULT_RATE_LIMIT_COOLDOWN_MS): void {
+export function markRateLimited(ref: string, cooldownMs: number = DEFAULT_RATE_LIMIT_COOLDOWN_MS, errorType?: string): void {
   const db = getDb()
-  const expiry = Date.now() + cooldownMs
-  db.prepare(
-    `INSERT OR REPLACE INTO cooldowns(model_ref, error_type, expiry_at, duration_ms, consecutive)
-     VALUES(?, 'other', ?, ?, 1)`,
-  ).run(ref, expiry, cooldownMs)
+  const now = Date.now()
+  const errType = errorType ?? 'other'
+
+  const existing = db.prepare(
+    'SELECT error_type, consecutive FROM cooldowns WHERE model_ref = ?',
+  ).get(ref) as { error_type: string; consecutive: number } | undefined
+
+  if (existing) {
+    if (existing.error_type === errType) {
+      // Same error type → increment consecutive and escalate
+      const consecutive = Math.min(existing.consecutive + 1, 12)
+      const duration = computeCooldownMs(consecutive)
+      const expiry = now + duration
+      db.prepare('UPDATE cooldowns SET error_type = ?, expiry_at = ?, duration_ms = ?, consecutive = ? WHERE model_ref = ?')
+        .run(errType, expiry, duration, consecutive, ref)
+      return
+    }
+    // Different error type → reset to 1 with base duration
+    const expiry = now + cooldownMs
+    db.prepare('INSERT OR REPLACE INTO cooldowns(model_ref, error_type, expiry_at, duration_ms, consecutive) VALUES(?, ?, ?, ?, 1)')
+      .run(ref, errType, expiry, cooldownMs)
+    return
+  }
+
+  // No existing entry → insert with consecutive=1
+  const expiry = now + cooldownMs
+  db.prepare('INSERT OR REPLACE INTO cooldowns(model_ref, error_type, expiry_at, duration_ms, consecutive) VALUES(?, ?, ?, ?, 1)')
+    .run(ref, errType, expiry, cooldownMs)
+}
+
+/**
+ * Reset cooldown for a model ref — clears the entry entirely.
+ * The next call to `markRateLimited` will start at consecutive=1.
+ *
+ * Safe to call on non-existent refs (no-op).
+ */
+export function resetCooldown(ref: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM cooldowns WHERE model_ref = ?').run(ref)
 }
 
 /**
  * Return all currently active rate limits, sorted by ref.
+ * Includes error type and consecutive count for display.
  */
-export function getActiveRateLimits(): Array<{ ref: string; remainingMs: number }> {
+export function getActiveRateLimits(): Array<{ ref: string; remainingMs: number; errorType: string; consecutive: number }> {
   const db = getDb()
   const now = Date.now()
-  const rows = db.prepare('SELECT model_ref, expiry_at FROM cooldowns WHERE expiry_at > ? ORDER BY model_ref').all(now) as Array<{ model_ref: string; expiry_at: number }>
+  const rows = db.prepare(
+    'SELECT model_ref, expiry_at, error_type, consecutive FROM cooldowns WHERE expiry_at > ? ORDER BY model_ref',
+  ).all(now) as Array<{ model_ref: string; expiry_at: number; error_type: string; consecutive: number }>
 
   // lazily clean up expired entries before returning
   db.prepare('DELETE FROM cooldowns WHERE expiry_at <= ?').run(now)
@@ -252,6 +287,8 @@ export function getActiveRateLimits(): Array<{ ref: string; remainingMs: number 
   return rows.map((r) => ({
     ref: r.model_ref,
     remainingMs: r.expiry_at - now,
+    errorType: r.error_type,
+    consecutive: r.consecutive,
   }))
 }
 
