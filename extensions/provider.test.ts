@@ -45,7 +45,7 @@ vi.mock('@earendil-works/pi-ai', () => {
 
 // Module under test — must come after vi.mock calls
 import { registerRouterProvider } from './provider'
-import { clearRateLimits, getActiveRateLimits } from './rate-limit-tracker'
+import { clearRateLimits, getActiveRateLimits, markRateLimited, resetCooldown } from './rate-limit-tracker'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -676,5 +676,132 @@ describe('cooldown behaviour', () => {
 
     // Aborted request + content already sent → no cooldown
     expect(getActiveRateLimits().length).toBe(0)
+  })
+
+  // -----------------------------------------------------------------------
+  // SLICE 2: Escalation tests
+  // -----------------------------------------------------------------------
+
+  it('escalates cooldown to 1h after 5 same-type errors', () => {
+    clearRateLimits()
+
+    for (let i = 0; i < 5; i++) {
+      markRateLimited('openai/gpt-4', 300_000, 'rate_limit')
+    }
+
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+    expect(limits[0].consecutive).toBe(5)
+    expect(limits[0].remainingMs).toBeGreaterThan(300_000) // escalated beyond 5m base
+  })
+
+  it('resets consecutive counter on different error type, stays at 5m tier', () => {
+    clearRateLimits()
+
+    markRateLimited('openai/gpt-4', 300_000, 'rate_limit')
+    markRateLimited('openai/gpt-4', 300_000, 'auth')
+
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+    expect(limits[0].consecutive).toBe(1)
+    expect(limits[0].remainingMs).toBeLessThanOrEqual(300_000 + 1000)
+  })
+
+  it('returns failure (no resetCooldown) when error-after-content followed by done', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      errorAfterContentStream('error', 'Mid-stream failure'),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Cooldown entry should exist — resetCooldown was NOT called on done
+    const limits = getActiveRateLimits()
+    expect(limits.length).toBe(1)
+    expect(limits[0].ref).toBe('openai/gpt-4')
+    expect(limits[0].remainingMs).toBeGreaterThan(0)
+  })
+
+  it('does not clear cooldown after error-after-content (entry stays)', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+      errorAfterContentStream('error', 'Mid-stream failure'),
+    )
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Entry still exists — resetCooldown was NOT called on done
+    const limits = getActiveRateLimits()
+    const gpt4Entry = limits.find(l => l.ref === 'openai/gpt-4')
+    expect(gpt4Entry).toBeDefined()
+    expect(gpt4Entry!.remainingMs).toBeGreaterThan(0)
+  })
+
+  it('calls resetCooldown on successful stream (entry cleared)', async () => {
+    clearRateLimits()
+
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const registry = {
+      find: vi.fn().mockReturnValue(mockModel()),
+      getApiKeyAndHeaders: vi
+        .fn()
+        .mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+    }
+
+    const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+    ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(successStream())
+
+    const providerCfg = setupRouter(config, registry)
+    const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+    const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+    const stream = providerCfg.streamSimple(model, ctx, {})
+    await (stream as any)._endPromise
+
+    // Model was actually delegated (not skipped due to cooldown)
+    expect(streamSimple).toHaveBeenCalled()
+
+    // No cooldown entry — clean success means resetCooldown was called
+    const limits = getActiveRateLimits()
+    const gpt4Entry = limits.find(l => l.ref === 'openai/gpt-4')
+    expect(gpt4Entry).toBeUndefined()
   })
 })

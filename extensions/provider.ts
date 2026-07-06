@@ -26,7 +26,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, isRateLimitError } from './rate-limit-tracker';
+import { isRateLimited, markRateLimited, classifyError, resetCooldown, isRateLimitError } from './rate-limit-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -313,6 +313,7 @@ async function tryModel(
   // Race: actual stream vs abort signal
   // We iterate the stream but also check signal between events
   let contentReceived = false;
+  let erredAfterContent = false;
   const iterator = delegatedStream[Symbol.asyncIterator]();
 
   while (true) {
@@ -379,12 +380,19 @@ async function tryModel(
     // Cooldown it so it is skipped on subsequent turns.
     // (Error-before-content throws to the routeStream catch block instead.)
     if (event.type === 'error' && contentReceived && event.reason !== 'aborted') {
-      markRateLimited(ref, config.rateLimitCooldownMs);
+      const errType = classifyError(event.error?.errorMessage ?? 'Unknown');
+      markRateLimited(ref, config.rateLimitCooldownMs, errType);
+      erredAfterContent = true;
     }
 
     if (event.type === 'done') {
+      if (erredAfterContent) {
+        stream.end();
+        return false;
+      }
+      resetCooldown(ref);
       stream.end();
-      return true; // success, outer loop should exit
+      return true;
     }
   }
 
@@ -590,11 +598,12 @@ const routeStream = (
         // are skipped on subsequent turns. RouterAbortError (pi timeout) is
         // NOT a model error — don't cooldown, just fail fast.
         if (!isAbort) {
-          // Cooldown model-level
-          markRateLimited(ref, config.rateLimitCooldownMs);
+          // Cooldown model-level dengan error classification
+          const errType = classifyError(lastError);
+          markRateLimited(ref, config.rateLimitCooldownMs, errType);
           // Cooldown provider-level untuk infra errors (502, 503, 504, dll)
           if (isProviderLevelError(lastError)) {
-            markRateLimited(`__provider:${resolved.provider}`, config.rateLimitCooldownMs);
+            markRateLimited(`__provider:${resolved.provider}`, config.rateLimitCooldownMs, 'provider_outage');
           }
         }
 
