@@ -44,7 +44,7 @@ vi.mock('@earendil-works/pi-ai', () => {
 })
 
 // Module under test — must come after vi.mock calls
-import { registerRouterProvider } from './provider'
+import { registerRouterProvider, syncContextWindow } from './provider'
 import { clearRateLimits, getActiveRateLimits, markRateLimited, resetCooldown } from './rate-limit-tracker'
 
 // ---------------------------------------------------------------------------
@@ -804,4 +804,97 @@ describe('cooldown behaviour', () => {
     const gpt4Entry = limits.find(l => l.ref === 'openai/gpt-4')
     expect(gpt4Entry).toBeUndefined()
   })
+
+  // -----------------------------------------------------------------------
+  // CTW sync (Slice 1): syncContextWindow helper + catch block sync
+  // -----------------------------------------------------------------------
+  describe('syncContextWindow', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      clearRateLimits()
+    })
+
+    it('syncs CTW to next candidate when model errors before content', async () => {
+      clearRateLimits()
+
+      // gpt-4 has larger CTW than claude-3, so buildModels max = 200K
+      // After error on gpt-4, sync to claude-3 reduces CTW to 100K
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4', 'anthropic/claude-3'] } },
+      }
+
+      const gpt4Model = mockModel({ id: 'gpt-4', provider: 'openai', contextWindow: 200_000 })
+      const claudeModel = mockModel({ id: 'claude-3', provider: 'anthropic', contextWindow: 100_000 })
+
+      const registry = {
+        find: vi.fn((_p: string, modelId: string) => {
+          if (modelId === 'gpt-4') return gpt4Model
+          if (modelId === 'claude-3') return claudeModel
+          return undefined
+        }),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(delegatedStream({
+          type: 'error',
+          reason: 'error',
+          error: { errorMessage: 'Model not found' },
+        }))
+        .mockReturnValueOnce(successStream())
+
+      const providerCfg = setupRouter(config, registry)
+      const routerModel: any = { id: 'test', provider: 'router', api: 'router-local-api', contextWindow: 200_000 }
+
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(routerModel, ctx, {})
+      await (stream as any)._endPromise
+
+      // After error on gpt-4 (200K CTW), CTW should sync to claude-3 (100K CTW, next candidate)
+      // If syncContextWindow is NOT implemented, CTW stays at 200K (buildModels max)
+      // If sync IS implemented, CTW becomes 100K
+      expect(routerModel.contextWindow).toBe(100_000)
+    })
+
+    it('does not sync CTW when model succeeds (no error)', async () => {
+      clearRateLimits()
+
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4', 'anthropic/claude-3'] } },
+      }
+
+      const gpt4Model = mockModel({ id: 'gpt-4', provider: 'openai', contextWindow: 32_000 })
+      const claudeModel = mockModel({ id: 'claude-3', provider: 'anthropic', contextWindow: 200_000 })
+
+      const registry = {
+        find: vi.fn((_p: string, modelId: string) => {
+          if (modelId === 'gpt-4') return gpt4Model
+          if (modelId === 'claude-3') return claudeModel
+          return undefined
+        }),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(successStream())
+
+      const providerCfg = setupRouter(config, registry)
+      const routerModel: any = { id: 'test', provider: 'router', api: 'router-local-api', contextWindow: 200_000 }
+
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(routerModel, ctx, {})
+      await (stream as any)._endPromise
+
+      // CTW should remain at max (200K from buildModels) — no sync happened
+      expect(routerModel.contextWindow).toBe(200_000)
+    })
+
+    it('syncContextWindow is no-op on null model', () => {
+      expect(() => syncContextWindow(null, 'some/ref', {} as any)).not.toThrow()
+    })
+  })
 })
+
