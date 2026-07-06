@@ -9,6 +9,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core'
 import { CONFIG_FILENAME, PROVIDER_NAME } from './constants.js'
 import { loadSeparateConfigs, getModelSource, normalizeConfig, type ModelSource } from './config.js'
 import { getActiveRateLimits, clearRateLimits, isRateLimited } from './rate-limit-tracker.js'
+import type { UsageRow } from './usage-tracker.js'
 
 const MAIN_MENU = [
   '🔧 Buat router baru',
@@ -31,6 +32,8 @@ const SUBCOMMANDS: Array<{
   { name: 'cd', description: 'Lihat cooldown aktif + eskalasi (alias: cooldown)' },
   { name: 'reload', description: 'Reload config dari file' },
   { name: 'clearcache', description: 'Reset cooldown cache' },
+  { name: 'cost', description: 'Lihat usage cost history (opsional: nama_router, --since=1w)' },
+  { name: 'cleanup', description: 'Hapus usage records lama: 24h, 1w, 1m, 2m, all' },
   { name: 'help', description: 'Bantuan' },
 ]
 
@@ -406,6 +409,30 @@ async function showRouter(
 // Register
 // ---------------------------------------------------------------------------
 
+function formatUsageTable(rows: UsageRow[]): string {
+  let totalTokens = 0
+  let totalCost = 0
+  const cols: string[] = []
+  for (const row of rows) {
+    totalTokens += row.totalTokens
+    totalCost += row.costTotal
+    const costStr = `$${row.costTotal.toFixed(4)}`
+    const date = new Date(row.timestamp).toLocaleString()
+    cols.push(
+      `  ${row.modelRef.padEnd(30)} ${String(row.inputTokens).toLocaleString().padStart(8)} ${String(row.outputTokens).toLocaleString().padStart(8)} ${String(row.totalTokens).toLocaleString().padStart(8)} ${costStr.padStart(10)}  ${date}`,
+    )
+  }
+  const divider = '  ' + '─'.repeat(70)
+  const totalCostStr = `$${totalCost.toFixed(4)}`
+  return [
+    `  ${'Model'.padEnd(30)} ${'Input'.padStart(8)} ${'Output'.padStart(8)} ${'Total'.padStart(8)} ${'Cost'.padStart(10)}  Timestamp`,
+    `  ${'─'.repeat(30)} ${'─'.repeat(8)} ${'─'.repeat(8)} ${'─'.repeat(8)} ${'─'.repeat(10)}  ${'─'.repeat(20)}`,
+    ...cols,
+    divider,
+    `  ${'TOTAL'.padEnd(30)} ${' '.repeat(8)} ${' '.repeat(8)} ${String(totalTokens).toLocaleString().padStart(8)} ${totalCostStr.padStart(10)}`,
+  ].join('\n')
+}
+
 export function registerCommands(
   api: ExtensionAPI,
   getMerged: () => RouterConfig,
@@ -495,6 +522,85 @@ export function registerCommands(
         return
       }
 
+      if (subcmd === 'cost') {
+        const costArgs = parts.slice(1)
+        let routerRef: string | undefined
+        let since: number | undefined
+
+        for (const arg of costArgs) {
+          if (arg.startsWith('--since=')) {
+            const val = arg.split('=')[1].toLowerCase()
+            const now = Date.now()
+            if (val === '24h') since = now - 86400000
+            else if (val === '1w') since = now - 604800000
+            else if (val === '1m') since = now - 2592000000
+            else if (val === '2m') since = now - 5184000000
+            else if (val !== 'all') {
+              ctx.ui.notify('⚠️ Invalid --since. Use: 24h | 1w | 1m | 2m | all', 'warning')
+              return
+            }
+          } else if (arg === '--since') {
+            ctx.ui.notify('⚠️ Use --since=24h format (with equals sign)', 'warning')
+            return
+          } else {
+            routerRef = arg
+          }
+        }
+
+        const { queryUsage } = await import('./usage-tracker')
+        const rows = queryUsage({ routerRef, since })
+
+        if (rows.length === 0) {
+          ctx.ui.notify('📊 No usage records found.', 'info')
+          return
+        }
+
+        const lines: string[] = []
+        lines.push(`📊 Usage${routerRef ? ` for "${routerRef}":` : ':'}`)
+        lines.push('')
+
+        if (!routerRef) {
+          const grouped = new Map<string, UsageRow[]>()
+          for (const row of rows) {
+            const list = grouped.get(row.routerRef) ?? []
+            list.push(row)
+            grouped.set(row.routerRef, list)
+          }
+          for (const [group, groupRows] of grouped) {
+            lines.push(`  ${group}:`)
+            lines.push(formatUsageTable(groupRows))
+          }
+        } else {
+          lines.push(formatUsageTable(rows))
+        }
+
+        ctx.ui.notify(lines.join('\n'), 'info')
+        return
+      }
+
+      if (subcmd === 'cleanup') {
+        const intervalArg = parts[1]?.toLowerCase()
+        const validIntervals = ['24h', '1w', '1m', '2m', 'all']
+        if (!intervalArg || !validIntervals.includes(intervalArg)) {
+          ctx.ui.notify('⚠️ Usage: /router cleanup 24h | 1w | 1m | 2m | all', 'warning')
+          return
+        }
+
+        let before: number = Number.MAX_SAFE_INTEGER
+        const now = Date.now()
+        switch (intervalArg) {
+          case '24h': before = now - 86400000; break
+          case '1w':  before = now - 604800000; break
+          case '1m':  before = now - 2592000000; break
+          case '2m':  before = now - 5184000000; break
+        }
+
+        const { cleanupUsage } = await import('./usage-tracker')
+        const deleted = cleanupUsage(before)
+        ctx.ui.notify(`🧹 Deleted ${deleted} usage records (${intervalArg} threshold).`, 'info')
+        return
+      }
+
       if (subcmd === 'help') {
         const helpLines = SUBCOMMANDS.map(
           (s) => `  ${s.name.padEnd(10)} — ${s.description}`,
@@ -528,6 +634,27 @@ export function registerCommands(
           }),
         )
         return filtered.length > 0 ? filtered : null
+      }
+
+      const [subcmd] = parts
+      if (subcmd === 'cost') {
+        return [
+          { value: '--since=24h', label: '--since=24h', description: 'Last 24 hours' },
+          { value: '--since=1w', label: '--since=1w', description: 'Last week' },
+          { value: '--since=1m', label: '--since=1m', description: 'Last month' },
+          { value: '--since=2m', label: '--since=2m', description: 'Last 2 months' },
+          { value: '--since=all', label: '--since=all', description: 'All time' },
+        ]
+      }
+
+      if (subcmd === 'cleanup') {
+        return [
+          { value: '24h', label: '24h', description: 'Older than 24 hours' },
+          { value: '1w', label: '1w', description: 'Older than 1 week' },
+          { value: '1m', label: '1m', description: 'Older than 1 month' },
+          { value: '2m', label: '2m', description: 'Older than 2 months' },
+          { value: 'all', label: 'all', description: 'Delete all records' },
+        ]
       }
 
       return null
