@@ -895,6 +895,37 @@ describe('cooldown behaviour', () => {
     it('syncContextWindow is no-op on null model', () => {
       expect(() => syncContextWindow(null, 'some/ref', {} as any)).not.toThrow()
     })
+
+    it('syncs CTW to next candidate when model errors after content', async () => {
+      clearRateLimits()
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4', 'anthropic/claude-3'] } },
+      }
+      const gpt4Model = mockModel({ id: 'gpt-4', provider: 'openai', contextWindow: 32_000 })
+      const claudeModel = mockModel({ id: 'claude-3', provider: 'anthropic', contextWindow: 200_000 })
+      const registry = {
+        find: vi.fn((_p: string, modelId: string) => {
+          if (modelId === 'gpt-4') return gpt4Model
+          if (modelId === 'claude-3') return claudeModel
+          return undefined
+        }),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(errorAfterContentStream('error', 'Mid-stream failure'))
+        .mockReturnValueOnce(successStream())
+
+      const providerCfg = setupRouter(config, registry)
+      const routerModel: any = { id: 'test', provider: 'router', api: 'router-local-api', contextWindow: 200_000 }
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(routerModel, ctx, {})
+      await (stream as any)._endPromise
+
+      // gpt-4 errors after content → next candidate is claude-3 (CTW 200K)
+      expect(routerModel.contextWindow).toBe(200_000)
+    })
   })
 })
 
