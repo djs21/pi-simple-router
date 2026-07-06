@@ -227,10 +227,12 @@ Models: thinker, pekerja
 | **Image Detection** | Filter model berdasarkan image support — detect otomatis dari `modelRegistry`, bukan dari config. |
 | **Context Truncation** | Otomatis truncate context (buang pesan tertua) kalo melebihi context window model target. |
 | **Dynamic Context Window Update** | CTW footer otomatis berubah sesuai model aktif — presisi context window tanpa restart. |
+| **Cost & Usage Tracking** | Catat biaya dan token per request ke SQLite. Lihat aggregate via `/router cost`. |
+| **Cooldown Escalation** | Error berulang pada model yang sama meningkatkan durasi cooldown (5m → 1h → 6h). |
 | **Re-registration Guard** | Fingerprint model definitions pake JSON hash. Skip re-register kalo config gak berubah — hemat resource. |
 | **Fallback Notification** | Notifikasi di output tiap kali terjadi fallback, jelas dari model mana ke mana. |
 | **2-Layer Config** | Global (`~/.pi/agent/`) + project (`.pi/`) — project override global. Cocok buat workspace-specific config. |
-| **Auto-completion** | `/router` command punya autocomplete untuk subcommands (`status`, `reload`, `help`). |
+| **Auto-completion** | `/router` command punya autocomplete untuk semua subcommands. |
 
 ---
 
@@ -287,7 +289,7 @@ npm test
 |---|---|
 | Heuristic routing (keyword/word-count/phase-bias) | Overkill untuk use case custom grouping |
 | LLM classifier routing | Kompleksitas tinggi, perlu fast model + prompt |
-| Cost budget / accumulated cost tracking | Stateless — no need |
+| Cost budget / accumulated cost tracking | **Supported** via `/router cost` + auto footer — SQLite persistent |
 | Phase bias / stickiness | Overengineering untuk v1 |
 | State persistence (pin/unpin) | Config file cukup |
 | Widget TUI | Cukup status line |

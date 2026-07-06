@@ -119,7 +119,7 @@ Single-context layout:
 
 | Path | Scope |
 |---|---|
-| `docs/` | Project documentation, plans, ADRs, PRDs. See `docs/plan.md` for implementation plan, `docs/prd-error-state-invisibility.md` for the error invisibility PRD, `docs/prd-cooldown-escalation.md` for the escalating cooldown + SQLite backend PRD, and `docs/prd-ctw-dynamic-update.md` for the dynamic context window update PRD. |
+| `docs/` | Project documentation, plans, ADRs, PRDs. See `docs/plan.md` for implementation plan, `docs/prd-error-state-invisibility.md` for the error invisibility PRD, `docs/prd-cooldown-escalation.md` for the escalating cooldown + SQLite backend PRD, `docs/prd-ctw-dynamic-update.md` for the dynamic context window update PRD, and `docs/prd-cost-usage.md` for the cost & usage tracking PRD. |
 | `extensions/` | Extension source code + tests (10 modules, ~1000 lines). Custom model router pi extension with fallback chain. Vitest unit tests in `*.test.ts`. See `docs/plan.md` for full spec. |
 | `README.md` | Project overview, instalasi, konfigurasi, usage, commands, features, development guide, dan lisensi dalam Bahasa Indonesia. |
 | `package.json` | Root project manifest: pi extension registration, scripts (`npm test` → vitest, `npm run typecheck` → tsc), devDependencies. |
