@@ -605,6 +605,10 @@ const routeStream = (
           i, candidates.length, elapsedStart,
         );
         if (succeeded) return; // outer IIFE returns, stream already ended inside tryModel
+
+        // Error-after-content: tryModel returned false → sync CTW to next candidate
+        const syncRef = isLast ? ref : candidates[i + 1];
+        syncContextWindow(model, syncRef, registry);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
 
