@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { RouterConfig } from './types'
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants'
 
@@ -46,6 +46,8 @@ vi.mock('@earendil-works/pi-ai', () => {
 // Module under test — must come after vi.mock calls
 import { registerRouterProvider, syncContextWindow } from './provider'
 import { clearRateLimits, getActiveRateLimits, markRateLimited, resetCooldown } from './rate-limit-tracker'
+import { queryUsage, _setDbForTesting } from './usage-tracker'
+import { DatabaseSync } from 'node:sqlite'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -296,9 +298,11 @@ describe('cooldown behaviour', () => {
    */
   function delegatedStream(
     event: Record<string, unknown>,
-  ): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    resultValue?: Record<string, unknown>,
+  ): { [Symbol.asyncIterator]: () => AsyncIterator<any>; result: () => Promise<any> } {
     let yielded = false
     return {
+      result: () => Promise.resolve(resultValue ?? { usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } } }),
       [Symbol.asyncIterator]: () => ({
         next: () => {
           if (!yielded) {
@@ -339,9 +343,10 @@ describe('cooldown behaviour', () => {
   }
 
   /** Create a delegated stream that succeeds (text_delta then done). */
-  function successStream(): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+  function successStream(resultValue?: Record<string, unknown>): { [Symbol.asyncIterator]: () => AsyncIterator<any>; result: () => Promise<any> } {
     let step = 0
     return {
+      result: () => Promise.resolve(resultValue ?? { usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } } }),
       [Symbol.asyncIterator]: () => ({
         next: () => {
           step++
@@ -588,9 +593,11 @@ describe('cooldown behaviour', () => {
   function errorAfterContentStream(
     reason: string = 'error',
     errorMessage: string = 'Mid-stream failure',
-  ): { [Symbol.asyncIterator]: () => AsyncIterator<any> } {
+    resultValue?: Record<string, unknown>,
+  ): { [Symbol.asyncIterator]: () => AsyncIterator<any>; result: () => Promise<any> } {
     let step = 0
     return {
+      result: () => Promise.resolve(resultValue ?? { usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } } }),
       [Symbol.asyncIterator]: () => ({
         next: () => {
           step++
@@ -927,5 +934,138 @@ describe('cooldown behaviour', () => {
       expect(routerModel.contextWindow).toBe(200_000)
     })
   })
+
+  // -----------------------------------------------------------------------
+  // Usage tracking (Slice 1): capture at 3 points in tryModel
+  // -----------------------------------------------------------------------
+  describe('usage tracking', () => {
+    beforeEach(() => {
+      clearRateLimits()
+      const memDb = new DatabaseSync(':memory:')
+      memDb.exec(`CREATE TABLE IF NOT EXISTS cooldowns (
+        model_ref     TEXT PRIMARY KEY,
+        error_type    TEXT NOT NULL,
+        expiry_at     INTEGER NOT NULL,
+        duration_ms   INTEGER NOT NULL,
+        consecutive   INTEGER DEFAULT 1 CHECK(consecutive >= 1)
+      )`)
+      memDb.exec(`CREATE TABLE IF NOT EXISTS usage (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        router_ref    TEXT NOT NULL,
+        model_ref     TEXT NOT NULL,
+        input_tokens  INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read    INTEGER NOT NULL DEFAULT 0,
+        cache_write   INTEGER NOT NULL DEFAULT 0,
+        total_tokens  INTEGER NOT NULL DEFAULT 0,
+        cost_input    REAL NOT NULL DEFAULT 0,
+        cost_output   REAL NOT NULL DEFAULT 0,
+        cost_total    REAL NOT NULL DEFAULT 0,
+        timestamp     INTEGER NOT NULL
+      )`)
+      memDb.exec(`CREATE INDEX IF NOT EXISTS idx_usage_timestamp ON usage(timestamp)`)
+      memDb.exec(`CREATE INDEX IF NOT EXISTS idx_usage_router_ref ON usage(router_ref)`)
+      _setDbForTesting(memDb)
+    })
+
+    afterEach(() => {
+      clearRateLimits()
+      _setDbForTesting(undefined)
+    })
+
+    it('records usage on successful stream', async () => {
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4'] } },
+      }
+      const registry = {
+        find: vi.fn().mockReturnValue(mockModel()),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+        successStream({ usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.0015 } } }),
+      )
+
+      const providerCfg = setupRouter(config, registry)
+      const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(model, ctx, {})
+      await (stream as any)._endPromise
+
+      const rows = queryUsage()
+      expect(rows.length).toBe(1)
+      expect(rows[0].routerRef).toBe('test')
+      expect(rows[0].modelRef).toBe('openai/gpt-4')
+      expect(rows[0].inputTokens).toBe(10)
+      expect(rows[0].outputTokens).toBe(20)
+      expect(rows[0].totalTokens).toBe(30)
+      expect(rows[0].costTotal).toBe(0.0015)
+    })
+
+    it('records usage on error-after-content', async () => {
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4'] } },
+      }
+      const registry = {
+        find: vi.fn().mockReturnValue(mockModel()),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+        errorAfterContentStream('error', 'Mid-stream failure', { usage: { input: 5, output: 10, totalTokens: 15, cost: { total: 0.0005 } } }),
+      )
+
+      const providerCfg = setupRouter(config, registry)
+      const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(model, ctx, {})
+      await (stream as any)._endPromise
+
+      const rows = queryUsage()
+      expect(rows.length).toBe(1)
+      expect(rows[0].routerRef).toBe('test')
+      expect(rows[0].modelRef).toBe('openai/gpt-4')
+      expect(rows[0].inputTokens).toBe(5)
+      expect(rows[0].outputTokens).toBe(10)
+      expect(rows[0].costTotal).toBe(0.0005)
+    })
+
+    it('records usage on error-before-content', async () => {
+      const config: RouterConfig = {
+        models: { test: { models: ['openai/gpt-4'] } },
+      }
+      const registry = {
+        find: vi.fn().mockReturnValue(mockModel()),
+        getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: 'sk-test', headers: {} }),
+      }
+
+      const { streamSimple } = await import('@earendil-works/pi-ai/compat')
+      ;(streamSimple as ReturnType<typeof vi.fn>).mockReturnValue(
+        delegatedStream(
+          { type: 'error', reason: 'error', error: { errorMessage: 'API error' } },
+          { usage: { input: 3, output: 0, totalTokens: 3, cost: { total: 0.0001 } } },
+        ),
+      )
+
+      const providerCfg = setupRouter(config, registry)
+      const model: any = { id: 'test', provider: 'router', api: 'router-local-api' }
+      const ctx: any = { messages: [{ role: 'user', content: 'hello' }] }
+
+      const stream = providerCfg.streamSimple(model, ctx, {})
+      await (stream as any)._endPromise
+
+      const rows = queryUsage()
+      expect(rows.length).toBe(1)
+      expect(rows[0].routerRef).toBe('test')
+      expect(rows[0].modelRef).toBe('openai/gpt-4')
+      expect(rows[0].inputTokens).toBe(3)
+      expect(rows[0].costTotal).toBe(0.0001)
+    })
+  })
 })
+
 

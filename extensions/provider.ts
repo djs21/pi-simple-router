@@ -27,6 +27,7 @@ import type { RouterConfig } from './types';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
 import { isRateLimited, markRateLimited, classifyError, resetCooldown, isRateLimitError } from './rate-limit-tracker';
+import { recordUsage } from './usage-tracker';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -375,6 +376,13 @@ async function tryModel(
 
     // If error arrives before any content, treat as delegation failure
     if (event.type === 'error' && !contentReceived) {
+      // Capture usage — provider tetap charge meskipun error
+      try {
+        const finalMsg = await delegatedStream.result();
+        if (finalMsg?.usage) {
+          recordUsage(output.model, ref, finalMsg.usage);
+        }
+      } catch { /* usage unavailable */ }
       const errMsg = event.error.errorMessage ?? `Model ${ref} failed before sending content`;
       // Classify: if it's an abort/aborted, treat as RouterAbortError
       if (event.reason === 'aborted') {
@@ -405,10 +413,24 @@ async function tryModel(
 
     if (event.type === 'done') {
       if (erredAfterContent) {
+        // Capture usage — provider tetap charge meskipun error
+        try {
+          const finalMsg = await delegatedStream.result();
+          if (finalMsg?.usage) {
+            recordUsage(output.model, ref, finalMsg.usage);
+          }
+        } catch { /* usage unavailable */ }
         stream.end();
         return false;
       }
       resetCooldown(ref);
+      // Capture real usage dari delegated stream
+      try {
+        const finalMsg = await delegatedStream.result();
+        if (finalMsg?.usage) {
+          recordUsage(output.model, ref, finalMsg.usage);
+        }
+      } catch { /* usage unavailable */ }
       stream.end();
       return true;
     }
