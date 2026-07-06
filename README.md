@@ -226,6 +226,7 @@ Models: thinker, pekerja
 | **Graceful Thinking Degrade** | Kalo model gak support thinking level yang diminta, otomatis downscale ke level maksimal model. Gak perlu config manual. |
 | **Image Detection** | Filter model berdasarkan image support — detect otomatis dari `modelRegistry`, bukan dari config. |
 | **Context Truncation** | Otomatis truncate context (buang pesan tertua) kalo melebihi context window model target. |
+| **Dynamic Context Window Update** | CTW footer otomatis berubah sesuai model aktif — presisi context window tanpa restart. |
 | **Re-registration Guard** | Fingerprint model definitions pake JSON hash. Skip re-register kalo config gak berubah — hemat resource. |
 | **Fallback Notification** | Notifikasi di output tiap kali terjadi fallback, jelas dari model mana ke mana. |
 | **2-Layer Config** | Global (`~/.pi/agent/`) + project (`.pi/`) — project override global. Cocok buat workspace-specific config. |
