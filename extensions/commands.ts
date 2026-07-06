@@ -556,21 +556,35 @@ export function registerCommands(
         }
 
         const lines: string[] = []
-        lines.push(`📊 Usage${routerRef ? ` for "${routerRef}":` : ':'}`)
-        lines.push('')
 
         if (!routerRef) {
+          // Aggregate per router config
           const grouped = new Map<string, UsageRow[]>()
           for (const row of rows) {
             const list = grouped.get(row.routerRef) ?? []
             list.push(row)
             grouped.set(row.routerRef, list)
           }
+
+          lines.push(`📊 Usage (aggregate):`)
+          lines.push('')
+          let grandTotal = 0
+          let grandInput = 0
+          let grandOutput = 0
           for (const [group, groupRows] of grouped) {
-            lines.push(`  ${group}:`)
-            lines.push(formatUsageTable(groupRows))
+            const cost = groupRows.reduce((s, r) => s + r.costTotal, 0)
+            const input = groupRows.reduce((s, r) => s + r.inputTokens, 0)
+            const output = groupRows.reduce((s, r) => s + r.outputTokens, 0)
+            grandTotal += cost
+            grandInput += input
+            grandOutput += output
+            lines.push(`  ${group.padEnd(16)} $${cost.toFixed(4)}  (${input.toLocaleString()} → ${output.toLocaleString()})`)
           }
+          lines.push(`  ${'─'.repeat(40)}`)
+          lines.push(`  ${'Total'.padEnd(16)} $${grandTotal.toFixed(4)}  (${grandInput.toLocaleString()} → ${grandOutput.toLocaleString()})`)
         } else {
+          lines.push(`📊 Usage for "${routerRef}":`)
+          lines.push('')
           lines.push(formatUsageTable(rows))
         }
 
