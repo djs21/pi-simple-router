@@ -80,6 +80,24 @@ const findModel = (
   return null;
 };
 
+/**
+ * Sync model.contextWindow to the resolved model's contextWindow.
+ * Direct mutation — propagates immediately to pi's footer display.
+ * No-op if model is null or ref can't be resolved.
+ */
+export const syncContextWindow = (
+  model: { contextWindow: number } | null,
+  ref: string,
+  registry: ModelRegistry,
+): void => {
+  if (!model) return;
+  const resolved = resolveModelRef(ref, registry);
+  if (!resolved) return;
+  const targetModel = findModel(registry, resolved.provider, resolved.modelId);
+  if (!targetModel) return;
+  model.contextWindow = targetModel.contextWindow;
+};
+
 /** Check whether the model referenced by a canonical ref supports image input. */
 const modelSupportsImage = (ref: string, registry: ModelRegistry | null): boolean => {
   const resolved = resolveModelRef(ref, registry);
@@ -605,6 +623,9 @@ const routeStream = (
           if (isProviderLevelError(lastError)) {
             markRateLimited(`__provider:${resolved.provider}`, config.rateLimitCooldownMs, 'provider_outage');
           }
+          // Sync CTW to reflect the next model that will handle requests
+          const syncRef = isLast ? ref : candidates[i + 1];
+          syncContextWindow(model, syncRef, registry);
         }
 
         if (!isLast) {
