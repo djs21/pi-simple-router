@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { RouterConfig } from './types.js'
 import { loadRouterConfig } from './config.js'
-import { registerRouterProvider } from './provider.js'
+import { registerRouterProvider, syncContextWindow } from './provider.js'
 import { registerCommands } from './commands.js'
 import { setStatusLine } from './ui.js'
 import { PROVIDER_NAME } from './constants.js'
@@ -64,6 +64,17 @@ export default function routerExtension(api: ExtensionAPI): void {
     ctx.ui.setStatus('router-chain', undefined)
   }
 
+  /** Sync CTW to the first non-cooldowned fallback model for the selected router model. */
+  function syncContextWindowForSelectedModel(ctx: ExtensionContext): void {
+    const model = ctx.model;
+    if (model?.provider !== PROVIDER_NAME) return;
+    const cfg = currentConfig.models[model.id];
+    if (!cfg) return;
+    const activeRef = cfg.models.find((ref) => !isRateLimited(ref));
+    if (!activeRef || !modelRegistry) return;
+    syncContextWindow(model, activeRef, modelRegistry);
+  }
+
   // --- Hooks ---
   api.on('session_start', async (_event: unknown, ctx: ExtensionContext) => {
     if (!modelRegistry) {
@@ -73,10 +84,12 @@ export default function routerExtension(api: ExtensionAPI): void {
     await loadAndRegister()
     setStatusLine(ctx, `🔀 Router: ${Object.keys(currentConfig.models).length} models`)
     updateRouterChainStatus(ctx)
+    syncContextWindowForSelectedModel(ctx)
   })
 
   api.on('model_select', (_event: unknown, ctx: ExtensionContext) => {
     updateRouterChainStatus(ctx)
+    syncContextWindowForSelectedModel(ctx)
   })
 
   api.on('turn_start', (_event: unknown, ctx: ExtensionContext) => {
