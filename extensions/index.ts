@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import type { RouterConfig } from './types.js'
 import { loadRouterConfig } from './config.js'
-import { registerRouterProvider, syncContextWindow } from './provider.js'
+import { registerRouterProvider, syncContextWindow, clearAuthCache, clearRegistryLookupCache } from './provider.js'
 import { registerCommands } from './commands.js'
 import { beforeProviderRequest } from './prompt-cache.js'
 import { setStatusLine } from './ui.js'
@@ -99,6 +99,11 @@ export default function routerExtension(api: ExtensionAPI): void {
 
   api.on('before_provider_request', (event, ctx) => {
     beforeProviderRequest(event.payload, ctx);
+  })
+
+  api.on('session_shutdown', () => {
+    clearAuthCache();
+    clearRegistryLookupCache();
   })
 
   api.on('session_shutdown', () => {

@@ -47,6 +47,18 @@ const isProviderLevelError = (error: unknown): boolean => {
 };
 
 // ---------------------------------------------------------------------------
+// Registry lookup cache — avoid redundant registry.find calls per session
+// ---------------------------------------------------------------------------
+
+const findModelCache = new Map<string, unknown>();
+const modelSupportsImageCache = new Map<string, boolean>();
+
+export const clearRegistryLookupCache = (): void => {
+  findModelCache.clear();
+  modelSupportsImageCache.clear();
+};
+
+// ---------------------------------------------------------------------------
 // Smart model lookup — handles OpenRouter's upstream-prefixed model IDs
 // ---------------------------------------------------------------------------
 
@@ -69,17 +81,22 @@ const findModel = (
   provider: string,
   modelId: string,
 ): ReturnType<ModelRegistry['find']> => {
+  const cacheKey = `${provider}/${modelId}`;
+  const cached = findModelCache.get(cacheKey);
+  if (cached !== undefined) return cached as ReturnType<ModelRegistry['find']>;
+
   // 1. Exact match
   const m = registry.find(provider, modelId);
-  if (m) return m;
+  if (m) { findModelCache.set(cacheKey, m); return m; }
 
   // 2. Try prepending provider as upstream prefix (handles OpenRouter)
   const prefixedId = `${provider}/${modelId}`;
   const m2 = registry.find(provider, prefixedId);
-  if (m2) return m2;
+  if (m2) { findModelCache.set(cacheKey, m2); return m2; }
 
+  findModelCache.set(cacheKey, null);
   return null;
-};
+}
 
 /**
  * Sync model.contextWindow to the resolved model's contextWindow.
@@ -101,11 +118,15 @@ export const syncContextWindow = (
 
 /** Check whether the model referenced by a canonical ref supports image input. */
 const modelSupportsImage = (ref: string, registry: ModelRegistry | null): boolean => {
+  const cached = modelSupportsImageCache.get(ref);
+  if (cached !== undefined) return cached;
   const resolved = resolveModelRef(ref, registry);
   if (!resolved || !registry) return false;
   const m = findModel(registry, resolved.provider, resolved.modelId);
-  return m?.input?.includes('image') ?? false;
-};
+  const result = m?.input?.includes('image') ?? false;
+  modelSupportsImageCache.set(ref, result);
+  return result;
+}
 
 /**
  * Truncate messages from the front (oldest first) until the
@@ -157,7 +178,7 @@ const buildModels = (
       // Skip metadata lookup when registry is not available yet
       // (eager registration). Defaults will be used.
       if (!registry) continue;
-      const m = registry.find(resolved.provider, resolved.modelId);
+      const m = findModel(registry, resolved.provider, resolved.modelId);
       if (!m) continue;
 
       if (m.contextWindow > maxCtx) maxCtx = m.contextWindow;
@@ -256,6 +277,10 @@ async function getCachedAuth(
   authCache.set(cacheKey, result);
   return result;
 }
+
+export const clearAuthCache = (): void => {
+  authCache.clear();
+};
 
 // ---------------------------------------------------------------------------
 // Timeout / abort helpers

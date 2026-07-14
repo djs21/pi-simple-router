@@ -44,7 +44,7 @@ vi.mock('@earendil-works/pi-ai', () => {
 })
 
 // Module under test — must come after vi.mock calls
-import { registerRouterProvider, syncContextWindow } from './provider'
+import { registerRouterProvider, syncContextWindow, clearRegistryLookupCache } from './provider'
 import { clearRateLimits, getActiveRateLimits, markRateLimited, resetCooldown } from './rate-limit-tracker'
 import { queryUsage, _setDbForTesting } from './usage-tracker'
 import { DatabaseSync } from 'node:sqlite'
@@ -79,6 +79,7 @@ describe('registerRouterProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    clearRegistryLookupCache()
   })
 
   it('registers the router provider with correct name', () => {
@@ -283,6 +284,85 @@ describe('registerRouterProvider', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Registry lookup cache tests
+// ---------------------------------------------------------------------------
+describe('registry lookup cache', () => {
+  const mockApi = { registerProvider: vi.fn() }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clearRegistryLookupCache()
+  })
+
+  it('caches repeated findModel calls', () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    const findFn = vi.fn().mockReturnValue(mockModel())
+    const registry = {
+      find: findFn,
+      getApiKeyAndHeaders: vi.fn(),
+    }
+
+    // First call: triggers registry.find
+    registerRouterProvider(mockApi as never, config, registry as never)
+    // buildModels calls findModel which calls registry.find once
+    expect(findFn).toHaveBeenCalledTimes(1)
+
+    // Second call with same provider/model: should use cache
+    registerRouterProvider(mockApi as never, config, registry as never)
+    expect(findFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears cache on clearRegistryLookupCache()', () => {
+    const config: RouterConfig = {
+      models: { test: { models: ['openai/gpt-4'] } },
+    }
+    let callCount = 0
+    const registry = {
+      find: vi.fn(() => {
+        callCount++
+        return mockModel()
+      }),
+      getApiKeyAndHeaders: vi.fn(),
+    }
+
+    registerRouterProvider(mockApi as never, config, registry as never)
+    expect(callCount).toBe(1)
+
+    clearRegistryLookupCache()
+
+    registerRouterProvider(mockApi as never, config, registry as never)
+    expect(callCount).toBe(2)
+  })
+
+  it('caches model lookups across registerRouterProvider calls', () => {
+    const config1: RouterConfig = {
+      models: { vision: { models: ['openai/gpt-4-vision'] } },
+    }
+    const config2: RouterConfig = {
+      models: { other: { models: ['openai/gpt-4-vision'] } },
+    }
+    const findFn = vi.fn().mockReturnValue(
+      mockModel({ input: ['text', 'image'] }),
+    )
+    const registry = {
+      find: findFn,
+      getApiKeyAndHeaders: vi.fn(),
+    }
+
+    registerRouterProvider(mockApi as never, config1, registry as never)
+    // buildModels calls find once (for 'openai/gpt-4-vision')
+    expect(findFn).toHaveBeenCalledTimes(1)
+
+    // Second registerRouterProvider with different config but same model ref
+    registerRouterProvider(mockApi as never, config2, registry as never)
+    // registry.find should still be called once — cached by findModel
+    expect(findFn).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Cooldown behaviour tests
 // ---------------------------------------------------------------------------
 describe('cooldown behaviour', () => {
@@ -291,6 +371,7 @@ describe('cooldown behaviour', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     clearRateLimits()
+    clearRegistryLookupCache()
   })
 
   /**
@@ -819,6 +900,7 @@ describe('cooldown behaviour', () => {
     beforeEach(() => {
       vi.clearAllMocks()
       clearRateLimits()
+      clearRegistryLookupCache()
     })
 
     it('syncs CTW to next candidate when model errors before content', async () => {
