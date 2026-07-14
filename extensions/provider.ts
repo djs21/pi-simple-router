@@ -7,7 +7,9 @@
  * falling back to the next on failure.
  */
 
+// pi-lens-disable find-import-file-without-extension
 import type { ExtensionAPI, ModelRegistry } from '@earendil-works/pi-coding-agent';
+// pi-lens-disable find-import-file-without-extension
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
   createAssistantMessageEventStream,
@@ -21,7 +23,9 @@ import {
   type TextContent,
   type ThinkingLevel as AiThinkingLevel,
   type ModelThinkingLevel,
+// pi-lens-disable find-import-file-without-extension
 } from '@earendil-works/pi-ai';
+// pi-lens-disable find-import-file-without-extension
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { RouterConfig } from './types.js';
 import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants.js';
@@ -375,7 +379,7 @@ async function tryModel(
       // If signal is already aborted, fail fast without waiting
       if (signal.aborted) {
         // Cancel the pending iterator — fire-and-forget, stream cleanup is best-effort
-        result = { done: true, value: undefined! };
+	result = { done: true, value: undefined } as unknown as Awaited<ReturnType<typeof iterator.next>>;
       } else {
         // Wait for next event OR abort, whichever comes first
         result = await Promise.race([
