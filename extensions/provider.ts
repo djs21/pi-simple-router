@@ -92,10 +92,10 @@ const findModel = (
   // 2. Try prepending provider as upstream prefix (handles OpenRouter)
   const prefixedId = `${provider}/${modelId}`;
   const m2 = registry.find(provider, prefixedId);
-  if (m2) { findModelCache.set(cacheKey, m2); return m2; }
+	if (m2) { findModelCache.set(cacheKey, m2); return m2; }
 
-  findModelCache.set(cacheKey, null);
-  return null;
+	// ponytail: sentinel only if not-found becomes hot path
+	return undefined;
 }
 
 /**
@@ -273,7 +273,7 @@ async function getCachedAuth(
   const auth = await registry.getApiKeyAndHeaders(targetModel);
   if (!auth || !auth.ok || !auth.apiKey) return null;
 
-  const result: CachedAuth = { apiKey: auth.apiKey, headers: auth.headers };
+	const result: CachedAuth = { apiKey: auth.apiKey, headers: auth.headers ?? {} };
   authCache.set(cacheKey, result);
   return result;
 }
@@ -330,9 +330,9 @@ async function tryModel(
   output: AssistantMessage,
   config: RouterConfig,
   registry: ModelRegistry,
-  refIdx: number,
-  totalRefs: number,
-  elapsedStart: number,
+	_refIdx: number,
+	_totalRefs: number,
+	_elapsedStart: number,
 ): Promise<boolean> {
   const signal = options?.signal;
 
@@ -367,7 +367,7 @@ async function tryModel(
 
     // Race the next event against the abort signal
     // If signal fires while waiting for next event, pi timed us out
-    let result: IteratorResult<AssistantMessageEventStream[0]>;
+	let result: Awaited<ReturnType<typeof iterator.next>>;
     if (signal) {
       // If signal is already aborted, fail fast without waiting
       if (signal.aborted) {
