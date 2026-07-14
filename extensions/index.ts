@@ -3,6 +3,7 @@ import type { RouterConfig } from './types.js'
 import { loadRouterConfig } from './config.js'
 import { registerRouterProvider, syncContextWindow } from './provider.js'
 import { registerCommands } from './commands.js'
+import { beforeProviderRequest } from './prompt-cache.js'
 import { setStatusLine } from './ui.js'
 import { PROVIDER_NAME } from './constants.js'
 import { isRateLimited } from './rate-limit-tracker.js'
@@ -94,6 +95,10 @@ export default function routerExtension(api: ExtensionAPI): void {
 
   api.on('turn_start', (_event: unknown, ctx: ExtensionContext) => {
     updateRouterChainStatus(ctx)
+  })
+
+  api.on('before_provider_request', (event, ctx) => {
+    beforeProviderRequest(event.payload, ctx);
   })
 
   api.on('session_shutdown', () => {
