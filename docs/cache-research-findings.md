@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD013 -->
 # Cache Research Findings — pi-ai Built-in vs Extension Hook
 
 ## Konfirmasi Reviewer P0
@@ -53,7 +54,7 @@ Jadi pi-opencode-go-cache nge-stamp manual via `before_provider_request` hook. I
 
 Hook masih viable — tapi jangan pake `ctx.model.api`. Alternatif:
 
-**Opsi A: Deteksi dari payload structure**
+#### Opsi A: Deteksi dari payload structure
 
 ```typescript
 // openai-completions payload: { model: "...", messages: [...], stream: true, ... }
@@ -67,7 +68,7 @@ function detectApiFormat(payload: Record<string, unknown>): string {
 
 Ini yang dilakukan pi-opencode-go-cache secara implisit — mereka cek `model.api` di `ctx` tapi itu spesifik opencode-go. Kita generalisir.
 
-**Opsi B: Inline stamping di tryModel — modify ctx.messages**
+#### Opsi B: Inline stamping di tryModel — modify ctx.messages
 
 - Kita punya akses ke `targetModel.api` (nilainya bener: `openai-completions`, `anthropic-messages`)
 - Tapi ini ngubah `Context.messages` pi-ai internal — perlu verifikasi apakah extra properties survive serialisasi
