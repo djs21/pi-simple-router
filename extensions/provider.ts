@@ -23,11 +23,11 @@ import {
   type ModelThinkingLevel,
 } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { RouterConfig } from './types';
-import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
-import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config';
-import { isRateLimited, markRateLimited, classifyError, resetCooldown, isRateLimitError } from './rate-limit-tracker';
-import { recordUsage } from './usage-tracker';
+import type { RouterConfig } from './types.js';
+import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants.js';
+import { resolveModelRef, getMaxThinkingLevel, contextHasImage } from './config.js';
+import { isRateLimited, markRateLimited, classifyError, resetCooldown, isRateLimitError } from './rate-limit-tracker.js';
+import { recordUsage } from './usage-tracker.js';
 
 // ---------------------------------------------------------------------------
 // Helpers (provider-local — generic helpers live in ./config.ts)
@@ -287,6 +287,7 @@ export const clearAuthCache = (): void => {
 // ---------------------------------------------------------------------------
 
 /** Error class for router-level timeouts (pi aborted the request). */
+// ponytail: split if class exceeds ~500 lines
 class RouterAbortError extends Error {
   constructor(msg: string) {
     super(msg);
@@ -295,6 +296,7 @@ class RouterAbortError extends Error {
 }
 
 /** Error class for per-model timeout (model too slow to start). */
+// ponytail: split if class exceeds ~500 lines
 class ModelTimeoutError extends Error {
   constructor(ref: string, elapsedMs: number) {
     super(`${ref} timeout after ${(elapsedMs / 1000).toFixed(1)}s`);
@@ -320,6 +322,7 @@ function checkAborted(signal?: AbortSignal): void {
  * Returns true if the model succeeded (outer loop should stop).
  * Throws on abort (pi-level timeout), returns false on delegation failure.
  */
+// ponytail: refactor to options object if params grow further
 async function tryModel(
   ref: string,
   targetModel: Model<Api>,
@@ -372,7 +375,7 @@ async function tryModel(
       // If signal is already aborted, fail fast without waiting
       if (signal.aborted) {
         // Cancel the pending iterator — fire-and-forget, stream cleanup is best-effort
-        result = { done: true, value: undefined as any };
+        result = { done: true, value: undefined! };
       } else {
         // Wait for next event OR abort, whichever comes first
         result = await Promise.race([
@@ -467,6 +470,7 @@ async function tryModel(
 }
 
 /** The router's streamSimple: iterate fallback chain and delegate. */
+// ponytail: refactor to options object if params grow further
 const routeStream = (
   model: Model<Api>,
   context: Context,
