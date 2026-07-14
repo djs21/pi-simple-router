@@ -65,7 +65,7 @@ export function recordUsage(
 export function queryUsage(opts?: { routerRef?: string; since?: number }): UsageRow[] {
   const db = getDb()
   const conditions: string[] = []
-  const params: unknown[] = []
+	const params: any[] = []
 
   if (opts?.routerRef) {
     conditions.push('router_ref = ?')
