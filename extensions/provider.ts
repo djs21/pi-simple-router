@@ -10,7 +10,7 @@
 // pi-lens-disable find-import-file-without-extension
 import type { ExtensionAPI, ModelRegistry } from '@earendil-works/pi-coding-agent';
 // pi-lens-disable find-import-file-without-extension
-import { streamSimple } from '@earendil-works/pi-ai/compat';
+import { streamSimple, registerApiProvider } from '@earendil-works/pi-ai/compat';
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -760,14 +760,27 @@ export const registerRouterProvider = (
   config: RouterConfig,
   modelRegistry: ModelRegistry | null,
 ): void => {
-  const models = buildModels(config, modelRegistry);
+	const models = buildModels(config, modelRegistry);
 
-  api.registerProvider(PROVIDER_NAME, {
-    baseUrl: 'http://router.local',
-    apiKey: 'pi-model-router',
-    api: 'router-local-api' as Api,
-    models,
-    streamSimple: (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream =>
-      routeStream(model, context, options, config, modelRegistry),
-  });
+	const streamFn = (
+		model: Model<Api>,
+		context: Context,
+		options?: SimpleStreamOptions,
+	): AssistantMessageEventStream =>
+		routeStream(model, context, options, config, modelRegistry);
+
+	api.registerProvider(PROVIDER_NAME, {
+		baseUrl: 'http://router.local',
+		apiKey: 'pi-model-router',
+		api: 'router-local-api' as Api,
+		models,
+		streamSimple: streamFn,
+	});
+
+	// pi-lens-disable no-as-any
+	registerApiProvider({
+		api: 'router-local-api',
+		stream: streamFn as any,
+		streamSimple: streamFn,
+	} as any);
 };

@@ -9,6 +9,7 @@ import { PROVIDER_NAME, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './con
 // ---------------------------------------------------------------------------
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
+  registerApiProvider: vi.fn(),
 }))
 
 vi.mock('@earendil-works/pi-ai', () => {
