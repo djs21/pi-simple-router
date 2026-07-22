@@ -103,22 +103,14 @@ export const getMaxThinkingLevel = (
 export const contextHasImage = (
   context: { messages?: Array<{ content?: unknown }> },
 ): boolean => {
-  if (!context.messages) return false
-
-  for (const msg of context.messages) {
-    const content = msg.content
-    if (!Array.isArray(content)) continue
-
-    for (const block of content) {
-      if (typeof block !== 'object' || block === null) continue
-      const obj = block as Record<string, unknown>
-      if (obj.type === 'image') return true
-      if (typeof obj.mimeType === 'string' && obj.mimeType.startsWith('image/')) return true
-    }
-  }
-
-  return false
-}
+  if (!context.messages) return false;
+  return context.messages.some((msg) => {
+    if (!Array.isArray(msg.content)) return false;
+    return (msg.content as Array<Record<string, unknown>>).some((block) =>
+      block != null && (block.type === 'image' || (typeof block.mimeType === 'string' && block.mimeType.startsWith('image/')))
+    );
+  });
+};
 
 export const resolveModelRef = (
   ref: string,

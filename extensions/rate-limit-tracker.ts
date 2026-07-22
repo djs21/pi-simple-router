@@ -103,8 +103,7 @@ const RATE_LIMIT_PATTERNS = [
  * Check whether an error message indicates a rate-limit or quota error.
  */
 export function isRateLimitError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
-  return RATE_LIMIT_PATTERNS.some((p) => msg.includes(p))
+  return classifyError(error) === 'rate_limit';
 }
 
 

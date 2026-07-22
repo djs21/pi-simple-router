@@ -107,7 +107,7 @@ function stampOpenAiCacheControl(payload: Record<string, unknown>): void {
 	if (sysMsg) sysMsg.cache_control = { type: "ephemeral" };
 
 	// Last user message
-	const lastUserIdx = findLastIndex(messages, (m) => m.role === "user");
+	const lastUserIdx = messages.findLastIndex((m) => m.role === "user");
 	if (lastUserIdx !== -1) {
 		messages[lastUserIdx].cache_control = { type: "ephemeral" };
 	}
@@ -127,12 +127,7 @@ function stampOpenAiCacheControl(payload: Record<string, unknown>): void {
 	}
 }
 
-function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
-	for (let i = arr.length - 1; i >= 0; i--) {
-		if (predicate(arr[i])) return i;
-	}
-	return -1;
-}
+
 
 // ---------------------------------------------------------------------------
 // Anthropic stamping
@@ -162,14 +157,14 @@ function stampAnthropicCacheControl(payload: Record<string, unknown>): void {
 		| Array<Record<string, unknown>>
 		| undefined;
 	if (messages) {
-		const lastUserIdx = findLastIndex(messages, (m) => m.role === "user");
+		const lastUserIdx = messages.findLastIndex((m) => m.role === "user");
 		if (lastUserIdx !== -1) {
 			const userMsg = messages[lastUserIdx];
 			const content = userMsg.content as
 				| Array<Record<string, unknown>>
 				| undefined;
 			if (Array.isArray(content)) {
-				const lastTextIdx = findLastIndex(content, (b) => b.type === "text");
+				const lastTextIdx = content.findLastIndex((b) => b.type === "text");
 				if (lastTextIdx !== -1) {
 					content[lastTextIdx].cache_control = { type: "ephemeral" };
 				}
