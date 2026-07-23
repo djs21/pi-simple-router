@@ -98,6 +98,22 @@ export function queryUsage(opts?: { routerRef?: string; since?: number }): Usage
   }))
 }
 
+/**
+ * Hitung cache hit ratio buat model_ref tertentu.
+ * ratio = SUM(cache_read) / SUM(input_tokens).
+ * Return null kalo gak ada data (total input_tokens = 0).
+ */
+export function queryCacheHitRate(modelRef: string): number | null {
+  const db = getDb()
+  const row = db.prepare(
+    `SELECT SUM(input_tokens) AS total_in, SUM(cache_read) AS total_cache
+     FROM ${TABLE}
+     WHERE model_ref = ? AND input_tokens > 0`,
+  ).get(modelRef) as { total_in: number; total_cache: number } | undefined
+  if (!row || !row.total_in) return null
+  return Math.round((row.total_cache / row.total_in) * 100)
+}
+
 export function cleanupUsage(before: number): number {
   const db = getDb()
   const result = db.prepare(`DELETE FROM ${TABLE} WHERE timestamp < ?`).run(before)

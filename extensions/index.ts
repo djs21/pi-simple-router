@@ -15,6 +15,7 @@ import { beforeProviderRequest } from "./prompt-cache.js";
 import { setStatusLine } from "./ui.js";
 import { PROVIDER_NAME } from "./constants.js";
 import { isRateLimited } from "./rate-limit-tracker.js";
+import { queryCacheHitRate } from "./usage-tracker.js";
 
 export default function routerExtension(api: ExtensionAPI): void {
 	// --- Closure state ---
@@ -63,7 +64,9 @@ export default function routerExtension(api: ExtensionAPI): void {
 				// Find the first model NOT in cooldown — that's the one router will use
 				const active = cfg.models.find((ref) => !isRateLimited(ref));
 				if (active) {
-					ctx.ui.setStatus("router-chain", `📎 ${active}`);
+					const pct = queryCacheHitRate(active);
+					const label = pct !== null ? `📎 ${active} (cache: ${pct}%)` : `📎 ${active}`;
+					ctx.ui.setStatus("router-chain", label);
 					return;
 				}
 				// All models cooldowned
