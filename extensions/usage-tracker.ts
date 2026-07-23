@@ -110,7 +110,7 @@ export function queryCacheHitRate(modelRef: string): number | null {
      FROM ${TABLE}
      WHERE model_ref = ? AND input_tokens > 0`,
   ).get(modelRef) as { total_in: number; total_cache: number } | undefined
-  if (!row || !row.total_in) return null
+  if (!row || !row.total_in || row.total_cache > row.total_in) return null
   return Math.round((row.total_cache / row.total_in) * 100)
 }
 
